@@ -23,6 +23,8 @@ The approved design and the implementation plan ship with the plugin:
 
 - [Design](docs/superpowers/specs/2026-07-18-codex-obsidian-context-vault-design.md)
 - [Implementation plan](docs/superpowers/plans/2026-07-18-context-vault-plugin.md)
+- [Codex project map](codex.md)
+- [Development transcript](.dev-transcript/2026-07-18-context-vault-build.md)
 
 ## Install from GitHub
 
