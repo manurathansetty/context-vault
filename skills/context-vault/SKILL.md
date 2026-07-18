@@ -5,33 +5,71 @@ description: Resume, query, and maintain durable project context in a local Obsi
 
 # Context Vault
 
-Context Vault is a durable, user-controlled project-memory layer for Codex. Its canonical data is standard Markdown beneath an Obsidian vault; the plugin never treats chat history as durable memory.
+Context Vault is a durable, user-controlled project-memory layer. Its canonical
+data is standard Markdown beneath an Obsidian vault; the plugin never treats chat
+history as durable memory.
+
+## Locate the CLI
+
+Every command below runs the Context Vault CLI (`context_vault.py`). Resolve its
+path once at the start of a session, then reuse it — do not hardcode a
+machine-specific path.
+
+- In Claude Code, `${CLAUDE_PLUGIN_ROOT}` is substituted into this skill with the
+  plugin's install directory, so set:
+
+  ```bash
+  CONTEXT_VAULT="${CLAUDE_PLUGIN_ROOT}/scripts/context_vault.py"
+  ```
+
+- In Codex there is no plugin-root variable. Point `CONTEXT_VAULT` at the
+  `scripts/context_vault.py` bundled with this plugin — the local clone or the
+  installed plugin directory — for example:
+
+  ```bash
+  CONTEXT_VAULT="$HOME/plugins/context-vault/scripts/context_vault.py"
+  ```
+
+Every command in this skill then runs as `python3 "$CONTEXT_VAULT" ...`.
 
 ## Setup check
 
-Before using a context command, check whether `~/.codex/context-vault/config.json` exists. If it does not, ask the user for the path to their Obsidian vault and have them run:
+Before using a context command, check whether the config file exists at
+`${XDG_CONFIG_HOME:-$HOME/.config}/context-vault/config.json` (the tool also still
+reads a legacy `~/.codex/context-vault/config.json` for older installs). If no
+config exists, ask the user for the path to their Obsidian vault and have them
+run:
 
 ```bash
-python3 ~/plugins/context-vault/scripts/context_vault.py configure --vault "/absolute/path/to/Obsidian Vault"
+python3 "$CONTEXT_VAULT" configure --vault "/absolute/path/to/Obsidian Vault"
 ```
 
-Do not search for, choose, or create an Obsidian vault on the user's behalf. After setup, commands use the configured vault automatically; `--vault /path` is available to override it for one command.
+Do not search for, choose, or create an Obsidian vault on the user's behalf.
+After setup, commands use the configured vault automatically; `--vault /path` is
+available to override it for one command.
 
 ## Task start: retrieve only relevant context
 
-When a task is tied to a configured project, run this before doing substantive work:
+When a task is tied to a configured project, run this before doing substantive
+work:
 
 ```bash
-python3 ~/plugins/context-vault/scripts/context_vault.py brief --workspace "$PWD"
+python3 "$CONTEXT_VAULT" brief --workspace "$PWD"
 ```
 
-Present a short brief containing the goal, open questions, current facts, active decisions, recent sessions, and the source note paths. Treat the brief as evidence-backed context, not as unquestionable truth. State uncertainty when no relevant note exists.
+Present a short brief containing the goal, open questions, current facts, active
+decisions, recent sessions, and the source note paths. Treat the brief as
+evidence-backed context, not as unquestionable truth. State uncertainty when no
+relevant note exists.
 
-If the workspace does not map to exactly one project, report the CLI error and ask the user to choose or register a project. Do not guess a project or create one silently.
+If the workspace does not map to exactly one project, report the CLI error and
+ask the user to choose or register a project. Do not guess a project or create
+one silently.
 
 ## Write protocol: proposal before persistence
 
-Never write raw transcript text. Never store credentials, private keys, or unsupported claims.
+Never write raw transcript text. Never store credentials, private keys, or
+unsupported claims.
 
 For every durable update:
 
@@ -44,42 +82,48 @@ Examples:
 
 ```bash
 # Changing fact; `--supersedes` is the earlier fact filename without .md.
-python3 ~/plugins/context-vault/scripts/context_vault.py propose-fact \
+python3 "$CONTEXT_VAULT" propose-fact \
   --project billing --subject '[[Auth service]]' --relation owner \
   --value '[[Platform team]]' --valid-from 2026-07-18 --evidence 'PR #421'
 
-python3 ~/plugins/context-vault/scripts/context_vault.py record-fact \
+python3 "$CONTEXT_VAULT" record-fact \
   --project billing --subject '[[Auth service]]' --relation owner \
   --value '[[Platform team]]' --valid-from 2026-07-18 --evidence 'PR #421' --confirm
 
-python3 ~/plugins/context-vault/scripts/context_vault.py propose-decision \
+python3 "$CONTEXT_VAULT" propose-decision \
   --project billing --title 'Use Postgres' --choice Postgres \
   --alternative DynamoDB --rationale 'Need relational transactions.' --evidence 'ADR-001'
 
-python3 ~/plugins/context-vault/scripts/context_vault.py propose-session \
+python3 "$CONTEXT_VAULT" propose-session \
   --project billing --completed 'Added migration' --blocker 'Awaiting review' \
   --next-step 'Open pull request' --evidence 'Codex task summary'
 ```
 
-For a replacement fact, create a new fact with `--supersedes`. Do not edit or delete the historical note. `valid_from` is when the fact became true; `recorded_at` is when Context Vault learned it. `valid_to`, when supplied, is an exclusive end date.
+For a replacement fact, create a new fact with `--supersedes`. Do not edit or
+delete the historical note. `valid_from` is when the fact became true;
+`recorded_at` is when Context Vault learned it. `valid_to`, when supplied, is an
+exclusive end date.
 
 ## Queries
 
-Use a context query for questions about current state, historical reality, what was known at a time, or a decision's rationale:
+Use a context query for questions about current state, historical reality, what
+was known at a time, or a decision's rationale:
 
 ```bash
 # Current project context
-python3 ~/plugins/context-vault/scripts/context_vault.py query \
+python3 "$CONTEXT_VAULT" query \
   --workspace "$PWD" --mode current
 
 # What was true on a date; optional --known-at limits facts to what was recorded then.
-python3 ~/plugins/context-vault/scripts/context_vault.py query \
+python3 "$CONTEXT_VAULT" query \
   --workspace "$PWD" --mode historical --valid-at 2026-04-01 \
   --known-at 2026-04-01T18:00:00+00:00
 
 # Decision evidence and subsequent project context
-python3 ~/plugins/context-vault/scripts/context_vault.py query \
+python3 "$CONTEXT_VAULT" query \
   --workspace "$PWD" --mode provenance --decision 'Use Postgres'
 ```
 
-Always cite the returned source paths when explaining a state or decision. Do not claim that a historical query means the system knew something at that date unless a `--known-at` filter was applied.
+Always cite the returned source paths when explaining a state or decision. Do not
+claim that a historical query means the system knew something at that date unless
+a `--known-at` filter was applied.
