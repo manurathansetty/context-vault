@@ -17,6 +17,46 @@ codex-context/
 
 Obsidian can browse the notes, links, backlinks, and graph normally. Git can version the vault. Context Vault does not create a separate authoritative database.
 
+## Team vaults (v0.2)
+
+Context Vault can share project memory across a dev team while your personal
+vault stays private. A **team vault** is a private git repository with the same
+Markdown layout; the project is the unit of sharing, and at most two team
+vaults may be configured.
+
+```bash
+# one-time, per teammate
+python3 scripts/context_vault.py configure --vault ~/Documents/context-vault --identity yourname
+python3 scripts/context_vault.py init-team --repo git@github.com:<your-org>/team-context-vault.git
+```
+
+`init-team` clones the vault, registers a git merge driver, writes
+`.gitattributes`/`.gitignore`, vendors a CI validator
+(`scripts/validate_vault.py` plus a GitHub Actions workflow), creates your
+`people/@you.md` note, and adds the vault to config.
+
+How it behaves:
+
+- **Memory travels faster than code.** Session recaps, facts, and decisions
+  push to the vault's `main` the moment they are approved — a teammate's brief
+  shows your schema work while the code is still an unmerged PR (sessions carry
+  `--branch`/`--pr` as recorded metadata; merge state is never claimed).
+- **Reads never rebase.** `brief`/`query` fetch and fast-forward only; every
+  git operation holds a per-vault lock, so concurrent agents serialize.
+- **Attribution is client-asserted.** Records are stamped `author`/`agent`
+  automatically from your configured identity — provenance, not proof.
+- **Conflicts are visible, never silent.** Notes auto-merge with a
+  `merge_status` mark and a repair chore; diverged records are preserved
+  byte-for-byte (one in place, one quarantined under
+  `codex-context/conflicts/`); contradictory facts surface as disputes in the
+  brief. Records are append-only by protocol, and CI flags any edit of an
+  existing record.
+- `doctor` checks identity, driver, remote, lock, and pending state;
+  `sync` and `vault list` round out the tooling.
+
+See the revised design in
+[docs/superpowers/specs/2026-07-19-cross-team-vault-design.md](docs/superpowers/specs/2026-07-19-cross-team-vault-design.md).
+
 ## Design and implementation
 
 The approved design and the implementation plan ship with the plugin:

@@ -127,3 +127,51 @@ python3 "$CONTEXT_VAULT" query \
 Always cite the returned source paths when explaining a state or decision. Do not
 claim that a historical query means the system knew something at that date unless
 a `--known-at` filter was applied.
+
+## Team vaults
+
+A team vault is a private git repository of shared project memory; the personal
+vault stays private and unstamped. The project is the unit of sharing, and at
+most two team vaults may be configured.
+
+One-time setup per teammate (identity first, then join):
+
+```bash
+python3 "$CONTEXT_VAULT" configure --vault "/absolute/path/to/personal-vault" --identity yourname
+python3 "$CONTEXT_VAULT" init-team --repo git@github.com:<your-org>/team-context-vault.git
+```
+
+To bootstrap a brand-new team vault, create an empty private repository on the
+host first, then run `init-team` against it.
+
+Behavior differences for projects that live in a team vault:
+
+- Reads (`brief`, `query`) fetch and fast-forward the team vault first; writes
+  commit and push to `main` immediately after `--confirm`. Never open a pull
+  request against the vault repository.
+- Records are stamped with the configured identity and agent automatically.
+  Pass `--agent claude-code` (or set `CONTEXT_VAULT_AGENT`) when recording.
+  Present stamps as claimed attribution — they record who the writing client
+  said it was, not verified identity.
+- Before asking the user to approve any proposal that will be persisted to a
+  team vault, state plainly: "this will be pushed to the team vault and visible
+  to your team." The secret patterns are a narrow net; the user's approval is
+  the real gate.
+- Record sessions with `--branch` and `--pr` whenever work is unmerged so
+  teammates can link up to in-flight code. These are recorded metadata only —
+  never claim to know whether a branch or PR has merged.
+- The brief may include `disputes` (contradictory active facts for an exclusive
+  relation): present every value with its author; never pick one silently.
+  Resolution is a new superseding fact recorded with user approval. Use
+  `--cardinality multi` for relations where several values are normal
+  (contributors, tags).
+- The brief may include `repair_chores`. As a small startup chore: for an
+  `auto-merged` note, fix duplicated or garbled text, remove the
+  `merge_status` frontmatter line, and commit `repair: clean up auto-merge`.
+  For a `needs-human` note or a `quarantined` record in
+  `codex-context/conflicts/`, show the user both versions and record their
+  resolution as a superseding note — never edit or delete either original.
+- The brief's `sync` map reports each team vault's state. If a vault is
+  offline, stale, or has unpushed records, say so when presenting the brief.
+- Run `python3 "$CONTEXT_VAULT" doctor` when sync misbehaves and report the
+  failing checks; `vault list` shows the configured vaults.
