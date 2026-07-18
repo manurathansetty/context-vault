@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -25,6 +26,9 @@ class ContextVaultTests(unittest.TestCase):
         self.workspace.mkdir()
         self.cli_env = os.environ.copy()
         self.cli_env["HOME"] = self.tempdir.name
+        # Keep configuration reads/writes inside the tempdir for both the new
+        # $XDG_CONFIG_HOME location and the legacy ~/.codex fallback.
+        self.cli_env["XDG_CONFIG_HOME"] = str(Path(self.tempdir.name) / "xdg")
 
     def run_cli(self, *args: str) -> CompletedProcess[str]:
         return run(
@@ -455,6 +459,52 @@ class ContextVaultTests(unittest.TestCase):
         self.assertEqual(len(brief["recent_sessions"]), 3)
         self.assertEqual(brief["recent_sessions"][0]["next_step"], "Next 4")
         self.assertEqual(brief["recent_sessions"][-1]["next_step"], "Next 2")
+
+    def test_configure_cli_writes_to_xdg_config_home(self) -> None:
+        configured = self.run_cli("configure", "--vault", str(self.vault))
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+
+        new_config = (
+            Path(self.cli_env["XDG_CONFIG_HOME"]) / "context-vault" / "config.json"
+        )
+        legacy_config = (
+            Path(self.tempdir.name) / ".codex" / "context-vault" / "config.json"
+        )
+        self.assertTrue(
+            new_config.is_file(),
+            "configure must write to $XDG_CONFIG_HOME/context-vault/config.json",
+        )
+        self.assertIn(str(self.vault.resolve()), new_config.read_text(encoding="utf-8"))
+        self.assertFalse(
+            legacy_config.exists(),
+            "configure must not write to the legacy ~/.codex/context-vault location",
+        )
+
+    def test_cli_reads_legacy_codex_config_as_fallback(self) -> None:
+        # A user who configured the Codex-only build has only the legacy config;
+        # reads must fall back to ~/.codex/context-vault/config.json with no
+        # re-configuration required.
+        legacy_dir = Path(self.tempdir.name) / ".codex" / "context-vault"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.json").write_text(
+            json.dumps({"vault_path": str(self.vault)}) + "\n", encoding="utf-8"
+        )
+
+        project = self.run_cli(
+            "project",
+            "--name",
+            "Billing",
+            "--workspace",
+            str(self.workspace),
+            "--goal",
+            "Finish migration",
+            "--confirm",
+        )
+
+        self.assertEqual(project.returncode, 0, project.stderr)
+        self.assertTrue(
+            (self.vault / "codex-context" / "projects" / "billing.md").is_file()
+        )
 
     def test_configure_creates_vault_layout(self) -> None:
         config_path = context_vault.configure(self.vault, self.config_home)

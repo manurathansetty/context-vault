@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import tempfile
 from datetime import date, datetime, timezone
@@ -69,21 +70,41 @@ def configure(vault: Path, config_home: Path | None = None) -> Path:
 
 
 def _config_dir() -> Path:
+    """Return the canonical write location for the config file.
+
+    Writes go to ``$XDG_CONFIG_HOME/context-vault`` (defaulting to
+    ``~/.config/context-vault`` when ``XDG_CONFIG_HOME`` is unset), keeping the
+    tool decoupled from any single agent host.
+    """
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg_config_home) if xdg_config_home else Path.home() / ".config"
+    return base / "context-vault"
+
+
+def _legacy_config_dir() -> Path:
+    """Return the pre-portability location used by Codex-only installs."""
     return Path.home() / ".codex" / "context-vault"
 
 
 def configured_vault() -> Path:
-    config_path = _config_dir() / "config.json"
-    try:
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
-        vault_path = payload["vault_path"]
-    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
-        raise ContextVaultError(
-            "no configured vault; run `context_vault.py configure --vault /path/to/vault`"
-        ) from exc
-    if not isinstance(vault_path, str) or not vault_path.strip():
-        raise ContextVaultError("configured vault path is invalid")
-    return Path(vault_path).expanduser().resolve()
+    # Prefer the portable location, then fall back to the legacy Codex path so
+    # existing users keep working without re-running `configure`.
+    search_paths = (
+        _config_dir() / "config.json",
+        _legacy_config_dir() / "config.json",
+    )
+    for config_path in search_paths:
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            vault_path = payload["vault_path"]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(vault_path, str) or not vault_path.strip():
+            raise ContextVaultError("configured vault path is invalid")
+        return Path(vault_path).expanduser().resolve()
+    raise ContextVaultError(
+        "no configured vault; run `context_vault.py configure --vault /path/to/vault`"
+    )
 
 
 def _vault_from_argument(value: str | None) -> Path:
