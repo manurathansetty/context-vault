@@ -1,0 +1,170 @@
+# Codex Obsidian Context Vault — Design
+
+## Status
+
+Approved for implementation on 2026-07-18.
+
+## Problem
+
+Developers lose important project context between Codex tasks: active goals, decisions and their rationale, facts that changed, failed approaches, and open blockers. Chat history alone is neither a reliable state store nor a human-readable project record.
+
+The system must let Codex resume a project with a compact, evidence-backed brief while leaving developers in control of the durable memory.
+
+## Product outcome
+
+Build a local Codex plugin that reads and proposes changes to an Obsidian Markdown vault. The vault is the canonical, portable, human-readable source of truth. A local derived index makes structured and temporal retrieval fast, but can always be rebuilt from the vault.
+
+The first release optimizes one workflow: resuming a multi-session development project without re-explaining its state.
+
+## Scope
+
+### In scope
+
+- A local Codex plugin named `context-vault`.
+- A configured Obsidian vault directory as the canonical store.
+- Project, decision, fact/event, and session-recap notes.
+- Explicit commands to start context, capture a proposed update, approve or discard it, close a task, and query context.
+- Append-only, time-aware facts with source evidence and supersession links.
+- A local index derived from Markdown frontmatter and links.
+- Current-state, historical-state, and decision-provenance retrieval.
+- Conservative safety behavior and automated tests.
+
+### Out of scope for version 1
+
+- A native Obsidian application plugin.
+- Hosted sync, collaboration, or a standalone graph database.
+- Automatic retention of raw Codex transcripts.
+- Embeddings, autonomous graph inference, or LLM-mediated conflict resolution.
+- Automatic writes without an explicit user approval step.
+
+## Chosen architecture
+
+```text
+Obsidian Markdown vault (canonical data)
+        <->
+Codex Context Vault plugin
+  - task-start retrieval
+  - capture proposal
+  - user-approved persistence
+  - time-aware context queries
+        <->
+Derived local index (rebuildable)
+```
+
+The implementation is a local Codex plugin containing instructions and a small, path-scoped tool layer. It reads from the configured vault and writes only after the developer approves a proposed update. Obsidian itself needs no integration beyond rendering the vault's standard Markdown links and frontmatter.
+
+The derived index is disposable. If it is absent or stale, the plugin can rebuild it from the canonical vault; it must never contain facts not represented by a note.
+
+## Vault structure
+
+The plugin owns a `codex-context/` folder inside the configured vault:
+
+```text
+codex-context/
+  projects/
+  decisions/
+  facts/
+  sessions/
+  templates/
+```
+
+Project notes link to their decisions, active facts, session recaps, and relevant file or entity notes. Standard Obsidian wiki links keep the graph human navigable.
+
+### Note types
+
+| Type | Purpose |
+| --- | --- |
+| Project | Project identity, repository mapping, current goal, active files, linked decisions, open questions. |
+| Decision | A choice, alternatives, rationale, evidence, and its current status. |
+| Fact/event | A durable, append-only claim that may be superseded as state changes. |
+| Session recap | Concise account of changed state, work completed, outstanding blocker, and evidence. |
+
+### Fact/event format
+
+```yaml
+---
+id: fact-auth-owner-2026-07-18
+type: fact
+project: "[[Example Project]]"
+subject: "[[Auth service]]"
+relation: owner
+value: "[[Platform team]]"
+valid_from: 2026-07-18
+valid_to:
+recorded_at: 2026-07-18T10:30:00+05:30
+status: active
+evidence:
+  - "PR #421"
+supersedes: "[[fact-auth-owner-2025]]"
+---
+```
+
+`valid_from` represents when a claim became true in the world; `recorded_at` represents when the vault learned it. A later change creates a new fact/event and points to the replaced item through `supersedes`; it does not mutate or delete the historical fact. `valid_to`, where known, closes a validity interval.
+
+This applies the useful part of a bitemporal graph without introducing a graph database: distinguish historical reality from the system's time of knowledge, and preserve attribution for state changes.
+
+## Daily workflow
+
+1. **Start context**
+   - Resolve the current workspace/repository to a project note.
+   - Retrieve the project goal, current decisions and facts, most recent recap, direct blockers, and cited evidence.
+   - Return a concise brief rather than raw notes or full history.
+2. **Work normally in Codex.**
+3. **Capture context**
+   - When meaningful work changes project state, Codex creates a structured proposal: fact, decision, or session update.
+   - The proposal includes source/evidence and whether it supersedes existing state.
+4. **Approve, edit, or discard**
+   - Only approval writes an entry to the vault and refreshes the derived index.
+5. **Close context**
+   - Write an approved compact session recap with completed work, changed decisions or facts, blockers, next step, and links.
+
+## Retrieval behavior
+
+The version-1 retrieval path is deterministic and local:
+
+1. Match the active workspace/repository to a project note.
+2. Read the project note and its direct links.
+3. Use structured metadata, exact entity/keyword matches, and recency to select relevant notes.
+4. Resolve active facts at the requested valid time.
+5. Return source-linked context within a bounded prompt budget.
+
+The plugin supports these query modes:
+
+- **Current state:** resolve facts valid now and not superseded by a later fact for the same scoped relationship.
+- **Historical state:** resolve what was valid at a requested date; an optional knowledge-time filter answers what had been recorded by that date.
+- **Decision provenance:** retrieve a decision, its alternatives, evidence, later supersessions, and related session recaps.
+
+Semantic/vector retrieval is deliberately deferred. It can be added later as an optional local index once the structured workflow proves valuable.
+
+## Safety and error handling
+
+- **Vault not configured or readable:** report the condition and perform no write.
+- **Ambiguous repository-to-project mapping:** show project candidates and request a selection; do not guess.
+- **Missing evidence:** label a capture as unsupported and require the user to add evidence before persistence.
+- **Concurrent vault edit:** re-read notes before writing and append a new event/recap instead of overwriting a changed record.
+- **Likely secret or credential:** exclude it from proposals by default and alert the user; raw transcript storage is disabled by default.
+- **Index missing or stale:** rebuild from Markdown; do not make the index authoritative.
+
+## Verification
+
+Automated coverage must include:
+
+- Markdown/frontmatter parsing and validation.
+- Valid-time and recorded-time temporal resolution, including late-recorded facts.
+- Supersession behavior without loss of historical facts.
+- Temporary-vault integration flows for start, capture, approve, discard, close, and historical queries.
+- Bounded retrieval that returns evidence links.
+- Safety cases: unreadable vault, ambiguous project, unsupported evidence, concurrent edit, and secret-like input.
+
+Manual acceptance checks must confirm that notes, wiki links, backlinks, and graph navigation stay understandable in Obsidian.
+
+## Success criteria
+
+One week after leaving a project, a developer can start a Codex task and receive a trustworthy, concise brief that identifies:
+
+- the active goal;
+- current decisions and changing facts;
+- recent work and unresolved blockers; and
+- evidence or note links supporting every material claim.
+
+The developer should not need to reconstruct the project by rereading raw chats or rediscovering rejected approaches.
