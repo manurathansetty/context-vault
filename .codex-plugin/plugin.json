@@ -1,0 +1,27 @@
+{
+  "name": "context-vault",
+  "version": "0.1.0+codex.20260718064510",
+  "description": "Versioned Obsidian context for Codex projects.",
+  "license": "MIT",
+  "author": {
+    "name": "manurathansetty"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Context Vault",
+    "shortDescription": "Resume work from a versioned Obsidian vault.",
+    "longDescription": "Loads source-linked project context from Obsidian and writes reviewed, time-aware project memory.",
+    "developerName": "manurathansetty",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Resume this project from my Context Vault.",
+      "Capture this decision in my Context Vault.",
+      "Why did we choose the current approach?"
+    ],
+    "brandColor": "#4F46E5"
+  }
+}
