@@ -466,6 +466,80 @@ class ContextVaultTests(unittest.TestCase):
         self.assertTrue((self.vault / "codex-context" / "sessions").is_dir())
         self.assertTrue((self.vault / "codex-context" / "templates").is_dir())
 
+    def test_records_link_back_to_their_project_note(self) -> None:
+        fact = context_vault.record_fact(
+            self.vault,
+            "billing",
+            "[[Auth service]]",
+            "owner",
+            "[[Platform]]",
+            "2026-07-18",
+            ["PR #421"],
+            confirm=True,
+        )
+        decision = context_vault.record_decision(
+            self.vault,
+            "billing",
+            "Use Postgres",
+            "Postgres",
+            ["DynamoDB"],
+            "Need relational transactions.",
+            ["ADR-001"],
+            confirm=True,
+        )
+        session = context_vault.record_session(
+            self.vault,
+            "billing",
+            ["Added migration"],
+            [],
+            "Open pull request",
+            ["Codex task summary"],
+            confirm=True,
+        )
+
+        for note_path in (fact, decision, session):
+            self.assertIn("[[billing]]", context_vault.read_note(note_path)["body"])
+
+    def test_brief_matches_workspace_inside_project_path(self) -> None:
+        context_vault.record_project(
+            self.vault,
+            "Billing",
+            [str(self.workspace)],
+            "Finish migration",
+            [],
+            True,
+        )
+        nested = self.workspace / "services" / "api"
+        nested.mkdir(parents=True)
+
+        brief = context_vault.build_brief(self.vault / "codex-context", nested)
+
+        self.assertEqual(brief["project"]["id"], "billing")
+
+    def test_workspace_match_prefers_most_specific_project_path(self) -> None:
+        nested = self.workspace / "services" / "api"
+        nested.mkdir(parents=True)
+        context_vault.record_project(
+            self.vault,
+            "Monorepo",
+            [str(self.workspace)],
+            "Own everything",
+            [],
+            True,
+        )
+        context_vault.record_project(
+            self.vault,
+            "API",
+            [str(nested)],
+            "Ship the API",
+            [],
+            True,
+        )
+
+        brief = context_vault.build_brief(self.vault / "codex-context", nested)
+
+        self.assertEqual(brief["project"]["id"], "api")
+
     def test_write_and_read_note_round_trip(self) -> None:
         note = context_vault.write_note(
             self.vault / "codex-context",

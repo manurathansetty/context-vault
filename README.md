@@ -63,6 +63,10 @@ python3 "$CONTEXT_VAULT/scripts/context_vault.py" project \
   --open-question "Confirm rollout" --confirm
 ```
 
+A workspace matches a project registered for that exact path or for any ancestor
+directory; when several projects match, the most specific registered path wins,
+and an exact tie still fails as ambiguous.
+
 ## Everyday flow
 
 1. Start Codex work with `brief --workspace "$PWD"`.

@@ -191,14 +191,23 @@ def record_project(
 
 
 def find_project(notes_root: Path, workspace: Path) -> dict[str, Any]:
-    expected_path = str(workspace.expanduser().resolve())
-    matches = [
-        note
-        for note in _read_folder(notes_root, "projects")
-        if expected_path in note["metadata"].get("workspace_paths", [])
-    ]
-    if not matches:
-        raise ProjectNotFoundError(f"no Context Vault project matches {expected_path}")
+    workspace_path = workspace.expanduser().resolve()
+    ancestor_depths = {
+        str(path): len(path.parts) for path in (workspace_path, *workspace_path.parents)
+    }
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for note in _read_folder(notes_root, "projects"):
+        depths = [
+            ancestor_depths[registered]
+            for registered in note["metadata"].get("workspace_paths", [])
+            if registered in ancestor_depths
+        ]
+        if depths:
+            scored.append((max(depths), note))
+    if not scored:
+        raise ProjectNotFoundError(f"no Context Vault project matches {workspace_path}")
+    best_depth = max(depth for depth, _ in scored)
+    matches = [note for depth, note in scored if depth == best_depth]
     if len(matches) > 1:
         names = ", ".join(str(match["metadata"].get("name")) for match in matches)
         raise AmbiguousProjectError(f"workspace matches multiple projects: {names}")
@@ -376,7 +385,7 @@ def record_fact(
         vault / "codex-context",
         "facts",
         metadata,
-        f"{subject} {relation} {value}.\n",
+        f"{subject} {relation} {value}.\n\nProject: [[{slugify(project)}]]\n",
     )
 
 
@@ -491,7 +500,12 @@ def record_decision(
         supersedes=supersedes,
         recorded_at=recorded_at,
     )
-    return write_note(vault / "codex-context", "decisions", metadata, f"# {title}\n\n{rationale}\n")
+    return write_note(
+        vault / "codex-context",
+        "decisions",
+        metadata,
+        f"# {title}\n\n{rationale}\n\nProject: [[{slugify(project)}]]\n",
+    )
 
 
 def propose_session(
@@ -542,7 +556,7 @@ def record_session(
         recorded_at=recorded_at,
     )
     lines = ["# Session recap", "", "## Completed", *completed, "", "## Blockers", *blockers]
-    lines.extend(["", "## Next step", next_step, ""])
+    lines.extend(["", "## Next step", next_step, "", f"Project: [[{slugify(project)}]]", ""])
     return write_note(vault / "codex-context", "sessions", metadata, "\n".join(lines))
 
 
