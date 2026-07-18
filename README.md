@@ -26,7 +26,7 @@ The approved design and the implementation plan ship with the plugin:
 - [Codex project map](codex.md)
 - [Development transcript](.dev-transcript/2026-07-18-context-vault-build.md)
 
-## Install from GitHub
+## Use with Codex
 
 Register the public GitHub repository as a Codex marketplace, then install the plugin:
 
@@ -36,6 +36,29 @@ codex plugin add context-vault@context-vault
 ```
 
 After opening a new Codex task, ask: `Configure Context Vault with my Obsidian vault at
+/absolute/path/to/Obsidian Vault`.
+
+## Use with Claude Code
+
+The same repository is also a Claude Code plugin and marketplace (via
+`.claude-plugin/`). Add the marketplace from GitHub, then install the plugin:
+
+```bash
+claude plugin marketplace add manurathansetty/context-vault
+claude plugin install context-vault@context-vault
+```
+
+The equivalent in-session slash commands are:
+
+```text
+/plugin marketplace add manurathansetty/context-vault
+/plugin install context-vault@context-vault
+```
+
+The skill loads on the next session (or after `/reload-plugins`) as
+`context-vault`. Claude Code substitutes `${CLAUDE_PLUGIN_ROOT}` with the
+plugin's install directory, so the CLI resolves without any hardcoded path.
+Then ask Claude to `Configure Context Vault with my Obsidian vault at
 /absolute/path/to/Obsidian Vault`.
 
 ## Direct script setup
@@ -53,7 +76,10 @@ python3 scripts/context_vault.py configure \
 For local development, the plugin can also be installed from the personal marketplace as
 `context-vault@personal`.
 
-Configuration is stored at `~/.codex/context-vault/config.json`. After configuration, commands automatically use that vault. Pass `--vault /another/path` to override it for a single command.
+Configuration is stored at `${XDG_CONFIG_HOME:-~/.config}/context-vault/config.json`
+(a legacy `~/.codex/context-vault/config.json` is still read as a fallback for
+older installs). After configuration, commands automatically use that vault. Pass
+`--vault /another/path` to override it for a single command.
 
 Register a project before retrieving a brief:
 

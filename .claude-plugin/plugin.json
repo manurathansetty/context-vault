@@ -1,0 +1,18 @@
+{
+  "name": "context-vault",
+  "version": "0.1.0",
+  "description": "Durable, reviewable project context stored as Markdown in a local Obsidian vault. Resume work, preserve decisions, and answer why a choice was made.",
+  "author": {
+    "name": "manurathansetty"
+  },
+  "homepage": "https://github.com/manurathansetty/context-vault",
+  "repository": "https://github.com/manurathansetty/context-vault",
+  "license": "MIT",
+  "keywords": [
+    "obsidian",
+    "memory",
+    "context",
+    "notes",
+    "productivity"
+  ]
+}

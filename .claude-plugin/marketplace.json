@@ -1,0 +1,17 @@
+{
+  "name": "context-vault",
+  "owner": {
+    "name": "manurathansetty"
+  },
+  "plugins": [
+    {
+      "name": "context-vault",
+      "source": "./",
+      "description": "Durable, reviewable project context stored as Markdown in a local Obsidian vault. Resume work, preserve decisions, and answer why a choice was made.",
+      "version": "0.1.0",
+      "author": {
+        "name": "manurathansetty"
+      }
+    }
+  ]
+}
