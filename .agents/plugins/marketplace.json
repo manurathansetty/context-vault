@@ -1,0 +1,20 @@
+{
+  "name": "context-vault",
+  "interface": {
+    "displayName": "Context Vault"
+  },
+  "plugins": [
+    {
+      "name": "context-vault",
+      "source": {
+        "source": "url",
+        "url": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

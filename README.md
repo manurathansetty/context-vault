@@ -17,22 +17,39 @@ codex-context/
 
 Obsidian can browse the notes, links, backlinks, and graph normally. Git can version the vault. Context Vault does not create a separate authoritative database.
 
-## Install and configure
+## Install from GitHub
 
-This plugin is published in the local personal Codex marketplace as `context-vault`.
+Register the public GitHub repository as a Codex marketplace, then install the plugin:
 
 ```bash
-codex plugin add context-vault@personal
-python3 ~/plugins/context-vault/scripts/context_vault.py configure \
+codex plugin marketplace add manurathansetty/context-vault
+codex plugin add context-vault@context-vault
+```
+
+After opening a new Codex task, ask: `Configure Context Vault with my Obsidian vault at
+/absolute/path/to/Obsidian Vault`.
+
+## Direct script setup
+
+Clone the repository when you want to use the command-line interface directly:
+
+```bash
+git clone https://github.com/manurathansetty/context-vault.git
+cd context-vault
+export CONTEXT_VAULT="$PWD"
+python3 scripts/context_vault.py configure \
   --vault "/absolute/path/to/Obsidian Vault"
 ```
+
+For local development, the plugin can also be installed from the personal marketplace as
+`context-vault@personal`.
 
 Configuration is stored at `~/.codex/context-vault/config.json`. After configuration, commands automatically use that vault. Pass `--vault /another/path` to override it for a single command.
 
 Register a project before retrieving a brief:
 
 ```bash
-python3 ~/plugins/context-vault/scripts/context_vault.py project \
+python3 "$CONTEXT_VAULT/scripts/context_vault.py" project \
   --name "Billing" --workspace "$PWD" --goal "Finish the migration" \
   --open-question "Confirm rollout" --confirm
 ```
@@ -52,7 +69,7 @@ The plugin never writes a note merely because a conversation happened.
 Facts are append-only. A new fact can supersede an old fact, preserving the history and its evidence.
 
 ```bash
-python3 ~/plugins/context-vault/scripts/context_vault.py record-fact \
+python3 "$CONTEXT_VAULT/scripts/context_vault.py" record-fact \
   --project billing --subject '[[Auth service]]' --relation owner \
   --value '[[Platform team]]' --valid-from 2026-07-18 \
   --evidence 'PR #421' --confirm
@@ -69,27 +86,27 @@ This supports both “what was true then?” and “what did the agent know then
 
 ```bash
 # Start/resume work
-python3 ~/plugins/context-vault/scripts/context_vault.py brief --workspace "$PWD"
+python3 "$CONTEXT_VAULT/scripts/context_vault.py" brief --workspace "$PWD"
 
 # Propose a fact without writing anything
-python3 ~/plugins/context-vault/scripts/context_vault.py propose-fact \
+python3 "$CONTEXT_VAULT/scripts/context_vault.py" propose-fact \
   --project billing --subject '[[Auth service]]' --relation owner \
   --value '[[Platform team]]' --valid-from 2026-07-18 --evidence 'PR #421'
 
 # Persist the reviewed fact
-python3 ~/plugins/context-vault/scripts/context_vault.py record-fact \
+python3 "$CONTEXT_VAULT/scripts/context_vault.py" record-fact \
   --project billing --subject '[[Auth service]]' --relation owner \
   --value '[[Platform team]]' --valid-from 2026-07-18 --evidence 'PR #421' --confirm
 
 # Query history or decision provenance
-python3 ~/plugins/context-vault/scripts/context_vault.py query \
+python3 "$CONTEXT_VAULT/scripts/context_vault.py" query \
   --workspace "$PWD" --mode historical --valid-at 2026-04-01
 
-python3 ~/plugins/context-vault/scripts/context_vault.py query \
+python3 "$CONTEXT_VAULT/scripts/context_vault.py" query \
   --workspace "$PWD" --mode provenance --decision 'Use Postgres'
 ```
 
-Run `python3 ~/plugins/context-vault/scripts/context_vault.py --help` for the complete command list.
+Run `python3 "$CONTEXT_VAULT/scripts/context_vault.py" --help` for the complete command list.
 
 ## Safety and privacy
 
