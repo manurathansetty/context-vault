@@ -256,7 +256,7 @@ configuration — under these rules:
 - Records remain append-only and immutable; `supersedes` remains the only
   correction mechanism. **[Amended by v0.4]** The Auto Mode design
   (`2026-07-19-auto-mode-v0.4-design.md`) adds `withdraw` (append-only
-  tombstone) as a second correction mechanism and a gated `retract --hard`;
+  tombstone) as a second correction mechanism and a gated `retract --remove-from-current-tree`;
   immutability and append-only history are unchanged. Record filenames gain a
   short random suffix, and record files are created with exclusive-create
   semantics (collision → regenerate suffix and retry), so identical-timestamp
@@ -322,8 +322,12 @@ the target is a synced vault, the proposal shown to the user must carry a
 visibility warning ("this will be pushed to the team vault and visible to your
 team") — the existing secret patterns are a narrow net, not a guarantee, and
 the human approval step is the real gate. There is no team review step for
-memory writes; git history is the audit mechanism and `git revert`/supersession
-the correction mechanisms.
+memory writes; git history is the audit mechanism. **Correction mechanisms
+[amended by v0.4]:** `supersedes` and `withdraw` (append-only tombstone) for
+normal corrections; `retract --remove-from-current-tree` only within a
+receipt-gated grace window for provably record-only commits; and for leaked
+credentials, incident remediation — rotate first, coordinated history cleanup
+only if warranted. Plain `git revert` is not a correction primitive.
 
 ## New commands
 
