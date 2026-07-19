@@ -701,5 +701,114 @@ class TeamVaultTests(unittest.TestCase):
         self.assertEqual(len(brief_payload["current_facts"]), 1)
 
 
+class TopicLayerTests(TeamVaultTests):
+    def test_record_repos_prefers_flags_then_workspace(self) -> None:
+        workspace = self._workspace_with_remote("repo-ws", "git@github.com:your-org/app.git")
+        self.assertEqual(
+            context_vault._record_repos(str(workspace), []), ["github.com/your-org/app"]
+        )
+        self.assertEqual(
+            context_vault._record_repos(str(workspace), ["https://github.com/your-org/Other.git"]),
+            ["github.com/your-org/other"],
+        )
+        plain = self.root / "no-remote"
+        plain.mkdir()
+        self.assertEqual(context_vault._record_repos(str(plain), []), [])
+        self.assertEqual(context_vault._record_repos(None, []), [])
+
+    def test_record_fact_stamps_repos_and_body_link(self) -> None:
+        vault = self.root / "team"
+        path = context_vault.record_fact(
+            vault, "fern-importer", "[[docs.yml]]", "parsed-by", "converter",
+            "2026-07-19", ["design"], True,
+            repos=["github.com/your-org/text-agent"],
+        )
+        note = context_vault.read_note(path)
+        self.assertEqual(note["metadata"]["repos"], ["github.com/your-org/text-agent"])
+        self.assertIn("[[text-agent]]", note["body"])
+
+    def test_session_can_span_multiple_repos(self) -> None:
+        payload = context_vault.propose_session(
+            "fern-importer", ["touched both"], [], "continue", ["notes"],
+            repos=["github.com/your-org/app", "github.com/your-org/text-agent"],
+        )
+        self.assertEqual(len(payload["repos"]), 2)
+
+    def test_done_projects_skipped_in_routing_and_lookup(self) -> None:
+        vault = self.root / "vault"
+        workspace = self.root / "retired-ws"
+        workspace.mkdir()
+        context_vault.record_project(
+            vault, "Old Topic", [str(workspace)], "Shipped", [], True, status="done"
+        )
+        with self.assertRaises(context_vault.ProjectNotFoundError):
+            context_vault.find_project(vault / "codex-context", workspace)
+        config = {"identity": None, "vaults": {"personal": {"path": vault, "sync": None}}}
+        with self.assertRaises(context_vault.ProjectNotFoundError):
+            context_vault.find_project_by_id(config, "old-topic")
+
+    def test_writes_to_done_project_are_refused(self) -> None:
+        vault = self.root / "vault"
+        context_vault.record_project(
+            vault, "Old Topic", [str(self.root / "x")], "Shipped", [], True, status="done"
+        )
+        config = {"identity": None, "vaults": {"personal": {"path": vault, "sync": None}}}
+        with self.assertRaises(context_vault.ContextVaultError):
+            context_vault.resolve_write_vault(config, "old-topic", None)
+
+    def test_brief_groups_records_by_repo(self) -> None:
+        vault = self.root / "team"
+        workspace = self.root / "fern-ws"
+        workspace.mkdir()
+        context_vault.record_project(
+            vault, "Fern Importer", [str(workspace)], "Import Fern docs", [], True
+        )
+        context_vault.record_fact(
+            vault, "fern-importer", "[[docs.yml]]", "parsed-by", "converter",
+            "2026-07-19", ["design"], True, repos=["github.com/your-org/app"],
+        )
+        context_vault.record_session(
+            vault, "fern-importer", ["schema work"], [], "continue", ["notes"],
+            confirm=True, repos=["github.com/your-org/text-agent"],
+        )
+        brief = context_vault.build_brief(vault / "codex-context", workspace)
+        self.assertIn("github.com/your-org/app", brief["by_repo"])
+        self.assertIn("github.com/your-org/text-agent", brief["by_repo"])
+        self.assertEqual(len(brief["by_repo"]["github.com/your-org/app"]["facts"]), 1)
+        self.assertEqual(
+            len(brief["by_repo"]["github.com/your-org/text-agent"]["sessions"]), 1
+        )
+
+    def test_cli_brief_by_project_without_workspace(self) -> None:
+        configured = self.run_cli("configure", "--vault", str(self.root / "vault"))
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        registered = self.run_cli(
+            "project", "--name", "Solo Topic", "--workspace", str(self.root / "anywhere"),
+            "--goal", "Test topic", "--confirm",
+        )
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        brief = self.run_cli("brief", "--project", "solo-topic")
+        self.assertEqual(brief.returncode, 0, brief.stderr)
+        payload = json.loads(brief.stdout)
+        self.assertEqual(payload["project"]["id"], "solo-topic")
+
+    def test_init_team_one_command_with_identity(self) -> None:
+        origin, clone_a, clone_b = self.make_team_setup()
+        target = self.root / "team-context"
+        run(["git", "clone", str(origin), str(target)], capture_output=True, check=True)
+        self._configure_git_user(target)
+        result = context_vault.init_team(
+            str(origin), name="team", path=target,
+            config_home=self.config_home, identity="blake",
+        )
+        self.assertTrue(result["sync"]["pushed"], result)
+        config = context_vault.load_config(config_home=self.config_home)
+        self.assertEqual(config["identity"], "blake")
+        self.assertTrue((target / "codex-context" / "people" / "@blake.md").is_file())
+        onboarding = target / "ONBOARDING.md"
+        self.assertTrue(onboarding.is_file())
+        self.assertIn(str(origin), onboarding.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()

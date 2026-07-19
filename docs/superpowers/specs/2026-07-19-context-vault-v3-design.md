@@ -8,10 +8,10 @@ Revised 2026-07-19 after three external review rounds
 `2026-07-19-context-vault-v3-review-round3.md`): direction approved; all
 rounds' resolutions are folded in below — the honest approval boundary,
 summarization execution contract, core scope policy, pending-store contract,
-revision-safe indexing. Prerequisites (v2.1 topic layer, capture hooks) are
-approved in discussion but their dedicated specs/plans **do not exist yet**;
-they are written at the start of their implementation and linked here before
-any v3 work begins.
+revision-safe indexing. Prerequisites are specified and implemented:
+[topic layer v2.1](2026-07-19-topic-layer-v2.1-design.md),
+[capture hooks](2026-07-19-capture-hooks-design.md), shared plan
+[`../plans/2026-07-19-topic-layer-and-hooks.md`](../plans/2026-07-19-topic-layer-and-hooks.md).
 
 ## Core policy layer and the approval boundary
 
@@ -93,7 +93,7 @@ repo facets; V3C upgrades the marker queue into a draft queue.
 
 ## Deferred — MCP server: memory for any agent (NOT in v3 scope)
 
-**Deferred 2026-07-19 (maintainer):** the team uses only Claude Code and Codex;
+**Deferred 2026-07-19 (maintainer decision):** the team uses only Claude Code and Codex;
 the existing adapters are sufficient. Revisit when a non-Claude/Codex agent
 actually needs vault access. The design below (including the review-hardened
 approval-token and vault-scope model) is preserved so that revisit starts

@@ -57,6 +57,15 @@ How it behaves:
 See the revised design in
 [docs/superpowers/specs/2026-07-19-cross-team-vault-design.md](docs/superpowers/specs/2026-07-19-cross-team-vault-design.md).
 
+### Topics across repos (v0.3)
+
+Projects are topics: register one project per initiative with every code repo
+it spans (`--workspace-repo`, repeatable). Records are stamped with the repo
+they came from (`--workspace "$PWD"`), sessions can span several repos,
+briefs group activity `by_repo`, and finished topics retire with
+`--status done`. Session-start/-end hooks (Claude Code) inject the brief
+automatically and queue capture reminders — approval stays human.
+
 ## Design and implementation
 
 The approved design and the implementation plan ship with the plugin:

@@ -175,3 +175,31 @@ Behavior differences for projects that live in a team vault:
   offline, stale, or has unpushed records, say so when presenting the brief.
 - Run `python3 "$CONTEXT_VAULT" doctor` when sync misbehaves and report the
   failing checks; `vault list` shows the configured vaults.
+
+## Topics and repos (v2.1)
+
+Projects are **topics** (initiatives like "Fern importer"), and one topic may
+span several code repositories via repeated `--workspace-repo` flags. Repos
+are a facet on records, not a folder:
+
+- When recording any fact, decision, or session, pass `--workspace "$PWD"` so
+  the record is stamped with the repo it came from (`repos:` frontmatter plus
+  a `Repos: [[name]]` graph link). Add explicit `--repo <url>` flags when the
+  work touched other repos too.
+- If a workspace maps to several topics, routing reports the candidates
+  instead of guessing: ask the user which topic applies, then rerun with
+  `--project <id>` (which also works without any `--workspace`).
+- Briefs include `by_repo` — use it to present team activity grouped by
+  repository ("in app: … · in text-agent: …").
+- Retire a finished topic by re-registering it with `--status done`; it drops
+  out of routing and refuses new records until revived with
+  `--status active`.
+
+## Capture hooks
+
+When installed (Claude Code), a SessionStart hook injects the brief
+automatically and may include **pending capture markers** from earlier
+sessions. Treat each marker as a startup chore: read the transcript it points
+to, build a `propose-session` recap, show it to the user, record only after
+their explicit approval, then delete the marker file. Never record a marker's
+recap without approval.

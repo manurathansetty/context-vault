@@ -283,11 +283,14 @@ def record_project(
     confirm: bool,
     *,
     workspace_repos: list[str] | None = None,
+    status: str = "active",
     recorded_at: str | None = None,
 ) -> Path:
     _require_confirmation(confirm)
     if not name.strip() or not goal.strip():
         raise ValueError("project name and goal are required")
+    if status not in ("active", "done"):
+        raise ValueError("project status must be 'active' or 'done'")
     project_id = slugify(name)
     normalized_paths = [str(Path(path).expanduser().resolve()) for path in workspace_paths]
     normalized_repos = [normalize_remote_url(repo) for repo in (workspace_repos or [])]
@@ -299,6 +302,7 @@ def record_project(
         "workspace_repos": normalized_repos,
         "goal": goal.strip(),
         "open_questions": open_questions,
+        "status": status,
         "recorded_at": recorded_at or _timestamp(),
     }
     return write_note(vault / "codex-context", "projects", metadata, f"# {name.strip()}\n")
@@ -311,6 +315,8 @@ def find_project(notes_root: Path, workspace: Path) -> dict[str, Any]:
     }
     scored: list[tuple[int, dict[str, Any]]] = []
     for note in _read_folder(notes_root, "projects"):
+        if note["metadata"].get("status", "active") == "done":
+            continue
         depths = [
             ancestor_depths[registered]
             for registered in note["metadata"].get("workspace_paths", [])
@@ -357,6 +363,28 @@ def workspace_remote(workspace: Path) -> str | None:
     return normalize_remote_url(url)
 
 
+def _record_repos(workspace: str | None, repo_flags: list[str] | None) -> list[str]:
+    """Repo facet for a record: explicit --repo flags win, else the workspace's origin."""
+    if repo_flags:
+        return [normalize_remote_url(repo) for repo in repo_flags]
+    if workspace:
+        remote = workspace_remote(Path(workspace).expanduser())
+        if remote:
+            return [remote]
+    return []
+
+
+def _repo_short(repo: str) -> str:
+    return repo.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _repos_body_line(repos: list[str] | None) -> str:
+    if not repos:
+        return ""
+    links = " ".join(f"[[{_repo_short(repo)}]]" for repo in repos)
+    return f"\nRepos: {links}\n"
+
+
 def find_project_across_vaults(
     config: dict[str, Any], workspace: Path
 ) -> tuple[str, dict[str, Any]]:
@@ -365,6 +393,8 @@ def find_project_across_vaults(
         remote_matches: list[tuple[str, dict[str, Any]]] = []
         for name, entry in config["vaults"].items():
             for note in _read_folder(entry["path"] / "codex-context", "projects"):
+                if note["metadata"].get("status", "active") == "done":
+                    continue
                 repos = [
                     normalize_remote_url(str(repo))
                     for repo in note["metadata"].get("workspace_repos", [])
@@ -406,6 +436,25 @@ def find_project_across_vaults(
     return name, note
 
 
+def find_project_by_id(config: dict[str, Any], project: str) -> tuple[str, dict[str, Any]]:
+    """Resolve a topic by its project id across vaults, skipping retired topics."""
+    project_id = slugify(project)
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for name, entry in config["vaults"].items():
+        for note in _read_folder(entry["path"] / "codex-context", "projects"):
+            if str(note["metadata"].get("id")) != project_id:
+                continue
+            if note["metadata"].get("status", "active") == "done":
+                continue
+            matches.append((name, note))
+    if not matches:
+        raise ProjectNotFoundError(f"no active project {project_id!r} in any configured vault")
+    if len(matches) > 1:
+        names = ", ".join(name for name, _ in matches)
+        raise AmbiguousProjectError(f"project {project_id!r} exists in multiple vaults: {names}")
+    return matches[0]
+
+
 def _vault_by_name(config: dict[str, Any], name: str) -> dict[str, Any]:
     try:
         return config["vaults"][name]
@@ -426,8 +475,14 @@ def resolve_write_vault(
     matches: list[tuple[str, dict[str, Any]]] = []
     for name, entry in config["vaults"].items():
         for note in _read_folder(entry["path"] / "codex-context", "projects"):
-            if str(note["metadata"].get("id")) == project_id:
-                matches.append((name, entry))
+            if str(note["metadata"].get("id")) != project_id:
+                continue
+            if note["metadata"].get("status", "active") == "done":
+                raise ContextVaultError(
+                    f"project {project_id!r} is retired (status: done); re-register it "
+                    "with --status active to revive before recording"
+                )
+            matches.append((name, entry))
     if len(matches) > 1:
         names = ", ".join(name for name, _ in matches)
         raise AmbiguousProjectError(f"project {project_id!r} exists in multiple vaults: {names}")
@@ -768,6 +823,14 @@ def build_brief(
     ]
     decisions = [_note_summary(note) for note in _active_decisions(notes_root, project["id"])]
     sessions = [_note_summary(note) for note in _recent_sessions(notes_root, project["id"])]
+    by_repo: dict[str, dict[str, list[str]]] = {}
+    for kind, items in (("facts", facts), ("decisions", decisions), ("sessions", sessions)):
+        for item in items:
+            for repo in item.get("repos") or []:
+                bucket = by_repo.setdefault(
+                    str(repo), {"facts": [], "decisions": [], "sessions": []}
+                )
+                bucket[kind].append(str(item.get("id")))
     return {
         "project": project,
         "goal": project["goal"],
@@ -775,6 +838,7 @@ def build_brief(
         "current_facts": facts,
         "active_decisions": decisions,
         "recent_sessions": sessions,
+        "by_repo": by_repo,
         "disputes": detect_disputes(facts),
         "repair_chores": repair_chores(notes_root),
         "sources": [
@@ -827,6 +891,7 @@ def propose_fact(
     valid_to: str | None = None,
     supersedes: str | None = None,
     cardinality: str | None = None,
+    repos: list[str] | None = None,
     recorded_at: str | None = None,
 ) -> dict[str, object]:
     if not all(value.strip() for value in (project, subject, relation, value, valid_from)):
@@ -839,7 +904,7 @@ def propose_fact(
     if valid_to is not None and date.fromisoformat(valid_to) <= valid_from_date:
         raise ValueError("valid_to must be later than valid_from")
     _assert_safe_strings(
-        [project, subject, relation, value, valid_from, *( [valid_to] if valid_to else [] ), *evidence]
+        [project, subject, relation, value, valid_from, *( [valid_to] if valid_to else [] ), *evidence, *(repos or [])]
     )
     timestamp = recorded_at or _timestamp()
     note_id = slugify(
@@ -861,6 +926,8 @@ def propose_fact(
     }
     if cardinality == "multi":
         payload["cardinality"] = "multi"
+    if repos:
+        payload["repos"] = repos
     return payload
 
 
@@ -893,6 +960,7 @@ def record_fact(
     valid_to: str | None = None,
     supersedes: str | None = None,
     cardinality: str | None = None,
+    repos: list[str] | None = None,
     recorded_at: str | None = None,
     author: str | None = None,
     agent: str | None = None,
@@ -911,9 +979,11 @@ def record_fact(
             valid_to=valid_to,
             supersedes=supersedes,
             cardinality=cardinality,
+            repos=repos,
             recorded_at=recorded_at,
         ),
-        f"{subject} {relation} {value}.\n\nProject: [[{slugify(project)}]]\n",
+        f"{subject} {relation} {value}.\n\nProject: [[{slugify(project)}]]\n"
+        + _repos_body_line(repos),
         author,
         agent,
     )
@@ -979,6 +1049,7 @@ def propose_decision(
     *,
     status: str = "active",
     supersedes: str | None = None,
+    repos: list[str] | None = None,
     recorded_at: str | None = None,
 ) -> dict[str, object]:
     if not all(value.strip() for value in (project, title, choice, rationale)):
@@ -986,10 +1057,10 @@ def propose_decision(
     if not evidence:
         raise ValueError("decisions require at least one evidence item")
     _assert_safe_strings(
-        [project, title, choice, rationale, status, *(alternatives or []), *evidence]
+        [project, title, choice, rationale, status, *(alternatives or []), *evidence, *(repos or [])]
     )
     timestamp = recorded_at or _timestamp()
-    return {
+    payload: dict[str, object] = {
         "id": slugify(f"decision-{project}-{title}-{timestamp}-{_record_suffix()}"),
         "type": "decision",
         "project": project,
@@ -1002,6 +1073,9 @@ def propose_decision(
         "evidence": evidence,
         "supersedes": supersedes,
     }
+    if repos:
+        payload["repos"] = repos
+    return payload
 
 
 def record_decision(
@@ -1016,6 +1090,7 @@ def record_decision(
     confirm: bool,
     status: str = "active",
     supersedes: str | None = None,
+    repos: list[str] | None = None,
     recorded_at: str | None = None,
     author: str | None = None,
     agent: str | None = None,
@@ -1033,9 +1108,11 @@ def record_decision(
             evidence,
             status=status,
             supersedes=supersedes,
+            repos=repos,
             recorded_at=recorded_at,
         ),
-        f"# {title}\n\n{rationale}\n\nProject: [[{slugify(project)}]]\n",
+        f"# {title}\n\n{rationale}\n\nProject: [[{slugify(project)}]]\n"
+        + _repos_body_line(repos),
         author,
         agent,
     )
@@ -1050,6 +1127,7 @@ def propose_session(
     *,
     branch: str | None = None,
     pr: str | None = None,
+    repos: list[str] | None = None,
     recorded_at: str | None = None,
 ) -> dict[str, object]:
     if not project.strip() or not next_step.strip():
@@ -1065,6 +1143,7 @@ def propose_session(
             *evidence,
             *([branch] if branch else []),
             *([pr] if pr else []),
+            *(repos or []),
         ]
     )
     timestamp = recorded_at or _timestamp()
@@ -1083,6 +1162,8 @@ def propose_session(
         payload["branch"] = branch
     if pr:
         payload["pr"] = pr
+    if repos:
+        payload["repos"] = repos
     return payload
 
 
@@ -1097,6 +1178,7 @@ def record_session(
     confirm: bool,
     branch: str | None = None,
     pr: str | None = None,
+    repos: list[str] | None = None,
     recorded_at: str | None = None,
     author: str | None = None,
     agent: str | None = None,
@@ -1115,9 +1197,10 @@ def record_session(
             evidence,
             branch=branch,
             pr=pr,
+            repos=repos,
             recorded_at=recorded_at,
         ),
-        "\n".join(lines),
+        "\n".join(lines) + _repos_body_line(repos),
         author,
         agent,
     )
@@ -1152,6 +1235,40 @@ GITIGNORE_CONTENT = """\
 .DS_Store
 """
 
+ONBOARDING_TEMPLATE = """\
+# Joining this team's Context Vault
+
+This repository is your team's shared project memory, managed by the
+[Context Vault](https://github.com/manurathansetty/context-vault) plugin.
+
+## One-time setup
+
+1. Install the plugin in your agent (Claude Code or Codex):
+
+   ```bash
+   claude plugin marketplace add manurathansetty/context-vault
+   claude plugin install context-vault@context-vault
+   ```
+
+2. Join this vault (pick your own identity name):
+
+   ```bash
+   python3 <plugin>/scripts/context_vault.py init-team \\
+     --repo {repo} --identity yourname
+   ```
+
+3. Verify:
+
+   ```bash
+   python3 <plugin>/scripts/context_vault.py doctor
+   ```
+
+That's it. Your agents now read this vault before working on team projects
+and record approved memory back to it, attributed to you. Records push to
+`main` directly — never open a pull request against this repository, and
+never force-push it.
+"""
+
 
 def register_merge_driver(vault_path: Path) -> None:
     script = str(Path(__file__).resolve())
@@ -1169,12 +1286,21 @@ def init_team(
     name: str = "team",
     path: Path | None = None,
     config_home: Path | None = None,
+    identity: str | None = None,
 ) -> dict[str, Any]:
-    config = load_config(config_home)
+    try:
+        config = load_config(config_home)
+    except ContextVaultError:
+        if not identity:
+            raise
+        # One-command onboarding: no prior config needed when --identity is given.
+        config = {"identity": identity, "vaults": {}}
+    if identity and not config.get("identity"):
+        config["identity"] = identity
     identity = config.get("identity")
     if not identity:
         raise ContextVaultError(
-            "init-team requires an identity; run "
+            "init-team requires an identity; pass --identity <name> or run "
             "`context_vault.py configure --vault <path> --identity <name>` first"
         )
     synced = [
@@ -1220,6 +1346,10 @@ def init_team(
         workflow.parent.mkdir(parents=True, exist_ok=True)
         workflow.write_text(VALIDATE_WORKFLOW, encoding="utf-8")
         created.append(workflow)
+    onboarding = target / "ONBOARDING.md"
+    if not onboarding.exists():
+        onboarding.write_text(ONBOARDING_TEMPLATE.format(repo=repo), encoding="utf-8")
+        created.append(onboarding)
     person = target / "codex-context" / "people" / f"@{slugify(identity)}.md"
     if not person.exists():
         created.append(ensure_person_note(target, identity))
@@ -1321,17 +1451,21 @@ def main(argv: list[str] | None = None) -> int:
     project_parser.add_argument("--workspace-repo", action="append", default=[])
     project_parser.add_argument("--goal", required=True)
     project_parser.add_argument("--open-question", action="append", default=[])
+    project_parser.add_argument("--status", choices=("active", "done"), default="active")
     project_parser.add_argument("--confirm", action="store_true")
 
     brief_parser = subparsers.add_parser("brief", help="retrieve a project startup brief")
     brief_parser.add_argument("--vault")
     brief_parser.add_argument("--vault-name")
-    brief_parser.add_argument("--workspace", required=True)
+    brief_parser.add_argument("--workspace")
+    brief_parser.add_argument("--project")
     brief_parser.add_argument("--valid-at")
     brief_parser.add_argument("--known-at")
 
     proposal = subparsers.add_parser("propose-fact", help="create a fact proposal without writing")
     proposal.add_argument("--vault")
+    proposal.add_argument("--workspace")
+    proposal.add_argument("--repo", action="append", default=[])
     proposal.add_argument("--project", required=True)
     proposal.add_argument("--subject", required=True)
     proposal.add_argument("--relation", required=True)
@@ -1347,6 +1481,8 @@ def main(argv: list[str] | None = None) -> int:
     record_fact_parser.add_argument("--vault")
     record_fact_parser.add_argument("--vault-name")
     record_fact_parser.add_argument("--agent")
+    record_fact_parser.add_argument("--workspace")
+    record_fact_parser.add_argument("--repo", action="append", default=[])
     record_fact_parser.add_argument("--project", required=True)
     record_fact_parser.add_argument("--subject", required=True)
     record_fact_parser.add_argument("--relation", required=True)
@@ -1361,6 +1497,8 @@ def main(argv: list[str] | None = None) -> int:
     decision_proposal_parser = subparsers.add_parser(
         "propose-decision", help="create a decision proposal without writing"
     )
+    decision_proposal_parser.add_argument("--workspace")
+    decision_proposal_parser.add_argument("--repo", action="append", default=[])
     decision_proposal_parser.add_argument("--project", required=True)
     decision_proposal_parser.add_argument("--title", required=True)
     decision_proposal_parser.add_argument("--choice", required=True)
@@ -1374,6 +1512,8 @@ def main(argv: list[str] | None = None) -> int:
     decision_parser.add_argument("--vault")
     decision_parser.add_argument("--vault-name")
     decision_parser.add_argument("--agent")
+    decision_parser.add_argument("--workspace")
+    decision_parser.add_argument("--repo", action="append", default=[])
     decision_parser.add_argument("--project", required=True)
     decision_parser.add_argument("--title", required=True)
     decision_parser.add_argument("--choice", required=True)
@@ -1387,6 +1527,8 @@ def main(argv: list[str] | None = None) -> int:
     session_proposal_parser = subparsers.add_parser(
         "propose-session", help="create a session proposal without writing"
     )
+    session_proposal_parser.add_argument("--workspace")
+    session_proposal_parser.add_argument("--repo", action="append", default=[])
     session_proposal_parser.add_argument("--project", required=True)
     session_proposal_parser.add_argument("--completed", action="append", default=[])
     session_proposal_parser.add_argument("--blocker", action="append", default=[])
@@ -1399,6 +1541,8 @@ def main(argv: list[str] | None = None) -> int:
     session_parser.add_argument("--vault")
     session_parser.add_argument("--vault-name")
     session_parser.add_argument("--agent")
+    session_parser.add_argument("--workspace")
+    session_parser.add_argument("--repo", action="append", default=[])
     session_parser.add_argument("--project", required=True)
     session_parser.add_argument("--completed", action="append", default=[])
     session_parser.add_argument("--blocker", action="append", default=[])
@@ -1411,7 +1555,8 @@ def main(argv: list[str] | None = None) -> int:
     query_parser = subparsers.add_parser("query", help="query current, historical, or decision context")
     query_parser.add_argument("--vault")
     query_parser.add_argument("--vault-name")
-    query_parser.add_argument("--workspace", required=True)
+    query_parser.add_argument("--workspace")
+    query_parser.add_argument("--project")
     query_parser.add_argument("--mode", choices=("current", "historical", "provenance"), required=True)
     query_parser.add_argument("--valid-at")
     query_parser.add_argument("--known-at")
@@ -1429,6 +1574,7 @@ def main(argv: list[str] | None = None) -> int:
     init_team_parser.add_argument("--repo", required=True)
     init_team_parser.add_argument("--vault-name", default="team")
     init_team_parser.add_argument("--path")
+    init_team_parser.add_argument("--identity")
 
     subparsers.add_parser("doctor", help="check team-vault health")
 
@@ -1454,6 +1600,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.open_question,
                 args.confirm,
                 workspace_repos=args.workspace_repo,
+                status=args.status,
             )
             result: dict[str, Any] = {"path": str(note)}
             if entry.get("sync") == "git":
@@ -1470,6 +1617,9 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError("provenance queries require --decision")
             if args.vault and args.vault_name:
                 raise ValueError("pass --vault or --vault-name, not both")
+            if not args.workspace and not args.project:
+                raise ValueError("pass --workspace or --project")
+            workspace_path = Path(args.workspace) if args.workspace else Path(".")
             sync_map: dict[str, Any] = {}
             project_note: dict[str, Any] | None = None
             if args.vault:
@@ -1486,14 +1636,17 @@ def main(argv: list[str] | None = None) -> int:
                         if entry.get("sync") == "git":
                             # Failure-isolated: an offline vault serves local notes.
                             sync_map[name] = sync_read(entry["path"])
-                    vault_name, project_note = find_project_across_vaults(
-                        config, Path(args.workspace)
-                    )
+                    if args.project:
+                        vault_name, project_note = find_project_by_id(config, args.project)
+                    else:
+                        vault_name, project_note = find_project_across_vaults(
+                            config, workspace_path
+                        )
                     notes_root = config["vaults"][vault_name]["path"] / "codex-context"
             if args.command == "query" and args.mode == "provenance":
                 payload = decision_provenance(
                     notes_root,
-                    Path(args.workspace),
+                    workspace_path,
                     args.decision,
                     valid_at,
                     known_at,
@@ -1501,7 +1654,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 payload = build_brief(
-                    notes_root, Path(args.workspace), valid_at, known_at, project_note
+                    notes_root, workspace_path, valid_at, known_at, project_note
                 )
             if sync_map:
                 payload["sync"] = sync_map
@@ -1519,6 +1672,7 @@ def main(argv: list[str] | None = None) -> int:
                     valid_to=args.valid_to,
                     supersedes=args.supersedes,
                     cardinality=args.cardinality,
+                    repos=_record_repos(args.workspace, args.repo),
                 )
             )
             return 0
@@ -1537,6 +1691,7 @@ def main(argv: list[str] | None = None) -> int:
                 valid_to=args.valid_to,
                 supersedes=args.supersedes,
                 cardinality=args.cardinality,
+                repos=_record_repos(args.workspace, args.repo),
                 author=stamp.get("author"),
                 agent=stamp.get("agent"),
             )
@@ -1558,6 +1713,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.evidence,
                     status=args.status,
                     supersedes=args.supersedes,
+                    repos=_record_repos(args.workspace, args.repo),
                 )
             )
             return 0
@@ -1575,6 +1731,7 @@ def main(argv: list[str] | None = None) -> int:
                 confirm=args.confirm,
                 status=args.status,
                 supersedes=args.supersedes,
+                repos=_record_repos(args.workspace, args.repo),
                 author=stamp.get("author"),
                 agent=stamp.get("agent"),
             )
@@ -1593,6 +1750,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.evidence,
                     branch=args.branch,
                     pr=args.pr,
+                    repos=_record_repos(args.workspace, args.repo),
                 )
             )
             return 0
@@ -1609,6 +1767,7 @@ def main(argv: list[str] | None = None) -> int:
                 confirm=args.confirm,
                 branch=args.branch,
                 pr=args.pr,
+                repos=_record_repos(args.workspace, args.repo),
                 author=stamp.get("author"),
                 agent=stamp.get("agent"),
             )
@@ -1625,6 +1784,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.repo,
                     name=args.vault_name,
                     path=Path(args.path) if args.path else None,
+                    identity=args.identity,
                 )
             )
             return 0
