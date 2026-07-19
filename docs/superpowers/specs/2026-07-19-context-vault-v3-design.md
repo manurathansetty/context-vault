@@ -269,6 +269,11 @@ memory about memory.
   origin, revocation is one config edit, **team vaults are excluded from
   automatic writes in v3** (personal vault only), and facts/decisions remain
   per-item human approvals permanently.
+  **[Amended by v0.4]** The Auto Mode design
+  (`2026-07-19-auto-mode-v0.4-design.md`, supersession matrix) explicitly
+  supersedes this clause's scoping for opted-in users: all record types, team
+  vaults included, per-member `auto enable`, `consent: auto` stamped.
+  Manual-mode users remain governed by this clause.
 - **Cheap and skippable:** drafting only runs for sessions above a substance
   threshold (same heuristic as the Tier-2 marker), and a config switch turns
   ambient drafting off entirely, falling back to markers.

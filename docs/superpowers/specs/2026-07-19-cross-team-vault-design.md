@@ -254,10 +254,13 @@ configuration — under these rules:
   `merge_status: auto-merged | needs-human`, written only by the merge driver
   and removed only by the repair chore. Records never carry `merge_status`.
 - Records remain append-only and immutable; `supersedes` remains the only
-  correction mechanism. Record filenames gain a short random suffix, and record
-  files are created with exclusive-create semantics (collision → regenerate
-  suffix and retry), so identical-timestamp writes on two machines cannot
-  collide or overwrite.
+  correction mechanism. **[Amended by v0.4]** The Auto Mode design
+  (`2026-07-19-auto-mode-v0.4-design.md`) adds `withdraw` (append-only
+  tombstone) as a second correction mechanism and a gated `retract --hard`;
+  immutability and append-only history are unchanged. Record filenames gain a
+  short random suffix, and record files are created with exclusive-create
+  semantics (collision → regenerate suffix and retry), so identical-timestamp
+  writes on two machines cannot collide or overwrite.
 
 ## Conflict layer
 
