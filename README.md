@@ -66,6 +66,18 @@ briefs group activity `by_repo`, and finished topics retire with
 `--status done`. Session-start/-end hooks (Claude Code) inject the brief
 automatically and queue capture reminders — approval stays human.
 
+### Auto mode (v0.4, experimental, default off)
+
+`auto enable [--vault-name X]` turns on standing consent per vault: agents
+record at milestone moments (schema landed, decision made, code committed,
+pre-compaction, wrap-up) without per-record approval — every such record is
+stamped `consent: auto` with its trigger and session, checkpoints supersede
+into one visible record per session, and a local ledger makes triggers
+idempotent. Corrections: `withdraw` (append-only tombstone, temporally
+honest) or `retract --remove-from-current-tree` (10-minute receipt-gated
+safe revert). `auto status` shows modes, pending syncs, and skipped
+duplicates. Manual mode is unchanged and remains the default.
+
 ## Design and implementation
 
 The approved design and the implementation plan ship with the plugin:

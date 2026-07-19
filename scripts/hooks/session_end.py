@@ -13,6 +13,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import ledger_has_wrapup  # noqa: E402
+
 MARKER_SCHEMA = 1
 MIN_USER_MESSAGES = 5
 MIN_TRANSCRIPT_BYTES = 20_000
@@ -68,6 +71,9 @@ def main() -> int:
     session_id = str(payload.get("session_id") or "")
     transcript_path = str(payload.get("transcript_path") or "")
     if not session_id or not transcript_path:
+        return 0
+    if ledger_has_wrapup(session_id):
+        # Auto mode already recorded this session's wrap-up; nothing to capture.
         return 0
     if not is_substantive(transcript_path):
         return 0

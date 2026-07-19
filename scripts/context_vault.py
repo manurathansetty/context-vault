@@ -4,12 +4,14 @@ import argparse
 import contextlib
 import difflib
 import fcntl
+import hashlib
 import json
 import os
 import re
 import secrets
 import subprocess
 import tempfile
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -61,7 +63,18 @@ def _assert_safe_strings(values: list[str]) -> None:
             raise SensitiveContentError("secret-like content cannot be stored in Context Vault")
 
 
-VAULT_FOLDERS = ("projects", "decisions", "facts", "sessions", "templates", "people", "conflicts")
+VAULT_FOLDERS = (
+    "projects",
+    "decisions",
+    "facts",
+    "sessions",
+    "templates",
+    "people",
+    "conflicts",
+    "withdrawals",
+)
+
+VALID_MODES = ("manual", "auto")
 
 
 def configure(vault: Path, config_home: Path | None = None, identity: str | None = None) -> Path:
@@ -109,13 +122,24 @@ def _parse_config(payload: dict[str, Any]) -> dict[str, Any]:
             path = entry.get("path") if isinstance(entry, dict) else None
             if not isinstance(path, str) or not path.strip():
                 raise ContextVaultError(f"vault {name!r} has an invalid path")
-            vaults[name] = {"path": Path(path).expanduser().resolve(), "sync": entry.get("sync")}
+            mode = entry.get("mode")
+            if mode is not None and mode not in VALID_MODES:
+                raise ContextVaultError(f"vault {name!r} has an invalid mode {mode!r}")
+            vaults[name] = {
+                "path": Path(path).expanduser().resolve(),
+                "sync": entry.get("sync"),
+                "mode": mode,
+                "mode_set_at": entry.get("mode_set_at"),
+            }
         synced = [name for name, entry in vaults.items() if entry.get("sync") == "git"]
         if len(synced) > 2:
             raise ContextVaultError(
                 "at most two team vaults are supported; remove one of: " + ", ".join(synced)
             )
-        return {"identity": identity, "vaults": vaults}
+        default_mode = payload.get("default_mode")
+        if default_mode is not None and default_mode not in VALID_MODES:
+            raise ContextVaultError(f"invalid default_mode {default_mode!r}")
+        return {"identity": identity, "vaults": vaults, "default_mode": default_mode}
     vault_path = payload.get("vault_path")
     if not isinstance(vault_path, str) or not vault_path.strip():
         raise ContextVaultError("configured vault path is invalid")
@@ -150,7 +174,12 @@ def save_config(config: dict[str, Any], config_home: Path | None = None) -> Path
     config_dir.mkdir(parents=True, exist_ok=True)
     payload: dict[str, object] = {}
     vaults = config["vaults"]
-    only_personal = list(vaults) == ["personal"] and not vaults["personal"].get("sync")
+    only_personal = (
+        list(vaults) == ["personal"]
+        and not vaults["personal"].get("sync")
+        and not vaults["personal"].get("mode")
+        and not config.get("default_mode")
+    )
     if only_personal:
         # Legacy shape keeps previously installed plugin versions working.
         if config.get("identity"):
@@ -160,10 +189,14 @@ def save_config(config: dict[str, Any], config_home: Path | None = None) -> Path
         payload["schema_version"] = 2
         if config.get("identity"):
             payload["identity"] = config["identity"]
+        if config.get("default_mode"):
+            payload["default_mode"] = config["default_mode"]
         payload["vaults"] = {
             name: {
                 "path": str(entry["path"]),
                 **({"sync": entry["sync"]} if entry.get("sync") else {}),
+                **({"mode": entry["mode"]} if entry.get("mode") else {}),
+                **({"mode_set_at": entry["mode_set_at"]} if entry.get("mode_set_at") else {}),
             }
             for name, entry in vaults.items()
         }
@@ -547,6 +580,360 @@ def ensure_person_note(vault: Path, identity: str, role: str | None = None) -> P
     return _write_markdown(path, metadata, f"# @{slug}\n")
 
 
+def vault_mode(config: dict[str, Any], vault_entry: dict[str, Any]) -> str:
+    """Effective mode for a vault. Environment override is downgrade-only:
+    CONTEXT_VAULT_MANUAL=1 forces manual; nothing can promote to auto."""
+    if os.environ.get("CONTEXT_VAULT_MANUAL") == "1":
+        return "manual"
+    return vault_entry.get("mode") or config.get("default_mode") or "manual"
+
+
+def set_vault_mode(
+    mode: str, vault_name: str | None = None, config_home: Path | None = None
+) -> dict[str, Any]:
+    if mode not in VALID_MODES:
+        raise ContextVaultError(f"invalid mode {mode!r}")
+    config = load_config(config_home)
+    stamp = _timestamp()
+    if vault_name is None:
+        config["default_mode"] = mode if mode == "auto" else None
+        for entry in config["vaults"].values():
+            entry["mode"] = None
+            entry["mode_set_at"] = stamp if mode == "auto" else None
+    else:
+        entry = _vault_by_name(config, vault_name)
+        entry["mode"] = mode if mode == "auto" else None
+        entry["mode_set_at"] = stamp if mode == "auto" else None
+    save_config(config, config_home)
+    return {
+        "mode": mode,
+        "scope": vault_name or "all vaults (default_mode)",
+        "set_at": stamp,
+        "note": (
+            "standing consent: records will be written and pushed without per-record "
+            "approval, stamped consent: auto"
+            if mode == "auto"
+            else "per-record approval restored"
+        ),
+    }
+
+
+def _ledger_dir() -> Path:
+    directory = _config_dir() / "ledger"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    return directory
+
+
+def _safe_session_id(session_id: str) -> str:
+    return "".join(ch for ch in session_id if ch.isalnum() or ch in "-_")[:80] or "unnamed"
+
+
+def ledger_entries(session_id: str) -> list[dict[str, Any]]:
+    path = _ledger_dir() / f"{_safe_session_id(session_id)}.jsonl"
+    if not path.exists():
+        return []
+    entries = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+
+def ledger_append(session_id: str, entry: dict[str, Any]) -> None:
+    path = _ledger_dir() / f"{_safe_session_id(session_id)}.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+    os.chmod(path, 0o600)
+
+
+def _idempotency_key(session_id: str, trigger: str, source: str | None) -> str:
+    return hashlib.sha256(f"{session_id}:{trigger}:{source or ''}".encode()).hexdigest()[:16]
+
+
+DEDUPED_TRIGGERS = ("git-commit", "precompact", "wrapup")
+
+TRIGGERS = ("milestone", "decision", "git-commit", "precompact", "wrapup")
+
+BASES = ("observed", "inferred", "user-stated")
+
+
+def auto_status(config: dict[str, Any]) -> dict[str, Any]:
+    vaults: dict[str, Any] = {}
+    for name, entry in config["vaults"].items():
+        info: dict[str, Any] = {"mode": vault_mode(config, entry)}
+        if entry.get("sync") == "git":
+            info.update(sync_status(entry["path"]))
+        vaults[name] = info
+    ledger_files = sorted(_ledger_dir().glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+    latest: dict[str, Any] = {}
+    if ledger_files:
+        entries = ledger_entries(ledger_files[-1].stem)
+        latest = {
+            "session": ledger_files[-1].stem,
+            "records": sum(1 for e in entries if e.get("event") == "write"),
+            "skipped_duplicates": sum(1 for e in entries if e.get("event") == "skip"),
+            "pending_sync": sum(
+                1
+                for e in entries
+                if e.get("event") == "write" and e.get("push_state") == "pending-sync"
+            ),
+        }
+    return {"vaults": vaults, "latest_session": latest}
+
+
+def _withdrawals(notes_root: Path) -> dict[str, str]:
+    """Map of withdrawn record stem -> withdrawal recorded_at."""
+    withdrawn: dict[str, str] = {}
+    for note in _read_folder(notes_root, "withdrawals"):
+        target = note["metadata"].get("withdraws")
+        if target:
+            withdrawn[str(target)] = str(note["metadata"].get("recorded_at", ""))
+    return withdrawn
+
+
+def withdraw_record(
+    vault: Path,
+    record: str,
+    reason: str,
+    confirm: bool,
+    *,
+    author: str | None = None,
+    agent: str | None = None,
+    consent: str | None = None,
+) -> Path:
+    _require_confirmation(confirm)
+    stem = Path(record).stem
+    notes_root = vault / "codex-context"
+    target = None
+    for folder in RECORD_FOLDERS:
+        candidate = notes_root / folder / f"{stem}.md"
+        if candidate.exists():
+            target = candidate
+            break
+    if target is None:
+        raise ContextVaultError(f"no record {stem!r} found in {vault}")
+    if stem in _withdrawals(notes_root):
+        raise ContextVaultError(f"record {stem!r} is already withdrawn")
+    timestamp = _timestamp()
+    metadata: dict[str, object] = {
+        "id": slugify(f"withdrawal-{stem}-{timestamp}-{_record_suffix()}"),
+        "type": "withdrawal",
+        "withdraws": stem,
+        "reason": reason,
+        "recorded_at": timestamp,
+    }
+    if author:
+        metadata["author"] = author
+        metadata["agent"] = agent or "unknown"
+    if consent:
+        metadata["consent"] = consent
+    body = f"Withdraws [[{stem}]]: {reason}\n"
+    return write_note(notes_root, "withdrawals", metadata, body, exclusive=True)
+
+
+def retract_record(
+    vault_path: Path, record: str, confirm: bool, grace_minutes: int = 10
+) -> dict[str, Any]:
+    """Remove a record from the current tree via a safe revert of its
+    record-only introducing commit. Not a history rewrite; refusals suggest
+    `withdraw`."""
+    _require_confirmation(confirm)
+    notes_root = vault_path / "codex-context"
+    stem = Path(record).stem
+    target = None
+    for folder in RECORD_FOLDERS:
+        candidate = notes_root / folder / f"{stem}.md"
+        if candidate.exists():
+            target = candidate
+            break
+    if target is None:
+        raise ContextVaultError(f"no record {stem!r} found in {vault_path}")
+    relative = target.relative_to(vault_path)
+    adds = _run_git(
+        vault_path, "log", "--diff-filter=A", "--format=%H", "--", str(relative)
+    ).stdout.split()
+    if not adds:
+        raise ContextVaultError(f"record {stem!r} has no committed introduction; use `withdraw`")
+    sha = adds[-1]
+    touched = [
+        line
+        for line in _run_git(vault_path, "show", "--name-only", "--format=", sha).stdout.splitlines()
+        if line.strip()
+    ]
+    if touched != [str(relative)]:
+        raise ContextVaultError(
+            f"commit {sha[:8]} is not record-only ({len(touched)} paths); use `withdraw`"
+        )
+    committed = int(_run_git(vault_path, "show", "-s", "--format=%ct", sha).stdout.strip() or "0")
+    if time.time() - committed > grace_minutes * 60:
+        raise ContextVaultError(
+            f"grace window of {grace_minutes} minutes has passed; use `withdraw` "
+            "(history and already-pulled clones retain the content either way)"
+        )
+    with _vault_lock(vault_path):
+        revert = _run_git(vault_path, "revert", "--no-commit", sha)
+        if revert.returncode != 0:
+            _run_git(vault_path, "revert", "--abort")
+            raise ContextVaultError(f"revert failed: {revert.stderr.strip()[:200]}")
+        _run_git(vault_path, "commit", "-m", f"retract: remove {stem} from current tree")
+        pushed = False
+        for _ in range(3):
+            if _run_git(vault_path, "push", timeout=GIT_TIMEOUT_SECONDS).returncode == 0:
+                pushed = True
+                break
+            pull = _run_git(vault_path, "pull", "--rebase", timeout=GIT_TIMEOUT_SECONDS)
+            if pull.returncode != 0:
+                _run_git(vault_path, "rebase", "--abort")
+                break
+    return {
+        "retracted": stem,
+        "reverted_commit": sha,
+        "pushed": pushed,
+        "note": "tree-level removal only; git history and already-pulled clones retain the content",
+    }
+
+
+def _find_record_vault(
+    config: dict[str, Any], stem: str, explicit_path: str | None, explicit_name: str | None
+) -> tuple[dict[str, Any], Path]:
+    if explicit_path and explicit_name:
+        raise ValueError("pass --vault or --vault-name, not both")
+    if explicit_path:
+        path = Path(explicit_path).expanduser().resolve()
+        for entry in config["vaults"].values():
+            if entry["path"] == path:
+                return entry, path
+        return {"path": path, "sync": None}, path
+    if explicit_name:
+        entry = _vault_by_name(config, explicit_name)
+        return entry, entry["path"]
+    matches = []
+    for name, entry in config["vaults"].items():
+        for folder in RECORD_FOLDERS:
+            if (entry["path"] / "codex-context" / folder / f"{stem}.md").exists():
+                matches.append((name, entry))
+                break
+    if not matches:
+        raise ContextVaultError(f"no record {stem!r} found in any configured vault")
+    if len(matches) > 1:
+        names = ", ".join(name for name, _ in matches)
+        raise AmbiguousProjectError(f"record {stem!r} exists in multiple vaults: {names}")
+    entry = matches[0][1]
+    return entry, entry["path"]
+
+
+def _auto_write_context(
+    config: dict[str, Any],
+    entry: dict[str, Any],
+    args: argparse.Namespace,
+    record_kind: str,
+) -> dict[str, Any]:
+    """Resolve auto-mode state for one write: effective confirm, provenance
+    stamps, idempotency, and the ledger plan. Manual mode returns a no-op."""
+    mode = vault_mode(config, entry)
+    context: dict[str, Any] = {
+        "mode": mode,
+        "confirm": args.confirm,
+        "extra": None,
+        "session_id": None,
+        "skip": None,
+        "trigger": None,
+        "idempotency_key": None,
+        "source_commit": None,
+    }
+    if mode != "auto":
+        return context
+    trigger = getattr(args, "trigger", None) or "milestone"
+    if trigger not in TRIGGERS:
+        raise ValueError(f"trigger must be one of: {', '.join(TRIGGERS)}")
+    session_id = getattr(args, "session_id", None) or f"auto-{int(time.time())}-{_record_suffix()}"
+    source_commit = getattr(args, "source_commit", None)
+    key = _idempotency_key(session_id, trigger, source_commit)
+    if trigger in DEDUPED_TRIGGERS and any(
+        item.get("idempotency_key") == key and item.get("event") == "write"
+        for item in ledger_entries(session_id)
+    ):
+        ledger_append(
+            session_id, {"event": "skip", "idempotency_key": key, "trigger": trigger}
+        )
+        context["skip"] = {
+            "skipped": "duplicate",
+            "trigger": trigger,
+            "idempotency_key": key,
+            "session_id": session_id,
+        }
+        return context
+    supersedes = getattr(args, "supersedes", None)
+    if record_kind == "session" and supersedes:
+        writes = [
+            item for item in ledger_entries(session_id) if item.get("event") == "write"
+        ]
+        if writes:
+            latest_stem = Path(str(writes[-1].get("record_path", ""))).stem
+            if supersedes != latest_stem:
+                raise ContextVaultError(
+                    f"a checkpoint may only supersede its own session's latest "
+                    f"checkpoint ({latest_stem!r}), not {supersedes!r}"
+                )
+    extra: dict[str, Any] = {"consent": "auto", "trigger": trigger, "session": session_id}
+    if source_commit:
+        extra["source_commit"] = source_commit
+    if record_kind in ("fact", "decision"):
+        basis = getattr(args, "basis", None) or "inferred"
+        if basis not in BASES:
+            raise ValueError(f"basis must be one of: {', '.join(BASES)}")
+        extra["basis"] = basis
+    context.update(
+        {
+            "confirm": True,
+            "extra": extra,
+            "session_id": session_id,
+            "trigger": trigger,
+            "idempotency_key": key,
+            "source_commit": source_commit,
+        }
+    )
+    return context
+
+
+def _ledger_record_write(
+    context: dict[str, Any],
+    entry: dict[str, Any],
+    vault_path: Path,
+    note: Path,
+    sync_result: dict[str, Any] | None,
+    workspace: str | None,
+    parent_checkpoint: str | None,
+) -> None:
+    if context.get("mode") != "auto" or not context.get("session_id"):
+        return
+    write_commit = None
+    push_state = "local"
+    if entry.get("sync") == "git":
+        write_commit = (
+            _run_git(vault_path, "log", "-1", "--format=%H", "--", str(note)).stdout.strip()
+            or None
+        )
+        push_state = "pushed" if (sync_result or {}).get("pushed") else "pending-sync"
+    ledger_append(
+        context["session_id"],
+        {
+            "event": "write",
+            "trigger": context.get("trigger"),
+            "workspace": workspace,
+            "source_commit": context.get("source_commit"),
+            "parent_checkpoint": parent_checkpoint,
+            "idempotency_key": context.get("idempotency_key"),
+            "record_path": str(note),
+            "write_commit": write_commit,
+            "push_state": push_state,
+        },
+    )
+
+
 GIT_TIMEOUT_SECONDS = 15
 
 
@@ -744,12 +1131,14 @@ def _note_summary(note: dict[str, Any]) -> dict[str, Any]:
 
 
 def _active_decisions(notes_root: Path, project_id: str) -> list[dict[str, Any]]:
+    withdrawn = _withdrawals(notes_root)
     decisions = [
         note
         for note in _read_folder(notes_root, "decisions")
         if note["metadata"].get("type") == "decision"
         and note["metadata"].get("project") == project_id
         and note["metadata"].get("status") == "active"
+        and note["path"].stem not in withdrawn
     ]
     superseded_ids = {
         str(note["metadata"]["supersedes"])
@@ -764,14 +1153,23 @@ def _active_decisions(notes_root: Path, project_id: str) -> list[dict[str, Any]]
 
 
 def _recent_sessions(notes_root: Path, project_id: str) -> list[dict[str, Any]]:
+    withdrawn = _withdrawals(notes_root)
     sessions = [
         note
         for note in _read_folder(notes_root, "sessions")
         if note["metadata"].get("type") == "session"
         and note["metadata"].get("project") == project_id
+        and note["path"].stem not in withdrawn
     ]
+    # Checkpoint chains: a superseded checkpoint is hidden by its successor,
+    # so one working session collapses to one visible record.
+    superseded_ids = {
+        str(note["metadata"]["supersedes"])
+        for note in sessions
+        if note["metadata"].get("supersedes")
+    }
     ordered = sorted(
-        sessions,
+        [note for note in sessions if note["path"].stem not in superseded_ids],
         key=lambda note: str(note["metadata"]["recorded_at"]),
         reverse=True,
     )
@@ -932,7 +1330,13 @@ def propose_fact(
 
 
 def _write_record(
-    vault: Path, folder: str, build_metadata, body: str, author: str | None, agent: str | None
+    vault: Path,
+    folder: str,
+    build_metadata,
+    body: str,
+    author: str | None,
+    agent: str | None,
+    extra: dict[str, Any] | None = None,
 ) -> Path:
     """Exclusively create a record, regenerating the random suffix on collision."""
     for _ in range(3):
@@ -940,6 +1344,8 @@ def _write_record(
         if author:
             metadata["author"] = author
             metadata["agent"] = agent or "unknown"
+        if extra:
+            metadata.update(extra)
         try:
             return write_note(vault / "codex-context", folder, metadata, body, exclusive=True)
         except FileExistsError:
@@ -964,6 +1370,7 @@ def record_fact(
     recorded_at: str | None = None,
     author: str | None = None,
     agent: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> Path:
     _require_confirmation(confirm)
     return _write_record(
@@ -986,6 +1393,7 @@ def record_fact(
         + _repos_body_line(repos),
         author,
         agent,
+        extra,
     )
 
 
@@ -1001,11 +1409,18 @@ def resolve_facts(
     valid_at: date,
     known_at: datetime | None = None,
 ) -> list[dict[str, Any]]:
+    withdrawn = _withdrawals(notes_root)
     candidates = []
     for note in _read_folder(notes_root, "facts"):
         metadata = note["metadata"]
         if metadata.get("type") != "fact":
             continue
+        withdrawal_time = withdrawn.get(note["path"].stem)
+        if withdrawal_time is not None:
+            # Bitemporal honesty: hidden from current state, but a --known-at
+            # earlier than the withdrawal still sees the record as it was known.
+            if known_at is None or _parse_recorded_at(withdrawal_time) <= known_at:
+                continue
         if date.fromisoformat(str(metadata["valid_from"])) > valid_at:
             continue
         valid_to = metadata.get("valid_to")
@@ -1094,6 +1509,7 @@ def record_decision(
     recorded_at: str | None = None,
     author: str | None = None,
     agent: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> Path:
     _require_confirmation(confirm)
     return _write_record(
@@ -1115,6 +1531,7 @@ def record_decision(
         + _repos_body_line(repos),
         author,
         agent,
+        extra,
     )
 
 
@@ -1128,6 +1545,7 @@ def propose_session(
     branch: str | None = None,
     pr: str | None = None,
     repos: list[str] | None = None,
+    supersedes: str | None = None,
     recorded_at: str | None = None,
 ) -> dict[str, object]:
     if not project.strip() or not next_step.strip():
@@ -1164,6 +1582,8 @@ def propose_session(
         payload["pr"] = pr
     if repos:
         payload["repos"] = repos
+    if supersedes:
+        payload["supersedes"] = supersedes
     return payload
 
 
@@ -1179,9 +1599,11 @@ def record_session(
     branch: str | None = None,
     pr: str | None = None,
     repos: list[str] | None = None,
+    supersedes: str | None = None,
     recorded_at: str | None = None,
     author: str | None = None,
     agent: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> Path:
     _require_confirmation(confirm)
     lines = ["# Session recap", "", "## Completed", *completed, "", "## Blockers", *blockers]
@@ -1198,11 +1620,13 @@ def record_session(
             branch=branch,
             pr=pr,
             repos=repos,
+            supersedes=supersedes,
             recorded_at=recorded_at,
         ),
         "\n".join(lines) + _repos_body_line(repos),
         author,
         agent,
+        extra,
     )
 
 
@@ -1461,6 +1885,7 @@ def main(argv: list[str] | None = None) -> int:
     brief_parser.add_argument("--project")
     brief_parser.add_argument("--valid-at")
     brief_parser.add_argument("--known-at")
+    brief_parser.add_argument("--consent", choices=("auto", "manual"))
 
     proposal = subparsers.add_parser("propose-fact", help="create a fact proposal without writing")
     proposal.add_argument("--vault")
@@ -1492,6 +1917,10 @@ def main(argv: list[str] | None = None) -> int:
     record_fact_parser.add_argument("--evidence", action="append", required=True)
     record_fact_parser.add_argument("--supersedes")
     record_fact_parser.add_argument("--cardinality", choices=("exclusive", "multi"))
+    record_fact_parser.add_argument("--trigger", choices=TRIGGERS)
+    record_fact_parser.add_argument("--session-id")
+    record_fact_parser.add_argument("--source-commit")
+    record_fact_parser.add_argument("--basis", choices=BASES)
     record_fact_parser.add_argument("--confirm", action="store_true")
 
     decision_proposal_parser = subparsers.add_parser(
@@ -1522,6 +1951,10 @@ def main(argv: list[str] | None = None) -> int:
     decision_parser.add_argument("--evidence", action="append", required=True)
     decision_parser.add_argument("--status", default="active")
     decision_parser.add_argument("--supersedes")
+    decision_parser.add_argument("--trigger", choices=TRIGGERS)
+    decision_parser.add_argument("--session-id")
+    decision_parser.add_argument("--source-commit")
+    decision_parser.add_argument("--basis", choices=BASES)
     decision_parser.add_argument("--confirm", action="store_true")
 
     session_proposal_parser = subparsers.add_parser(
@@ -1550,6 +1983,10 @@ def main(argv: list[str] | None = None) -> int:
     session_parser.add_argument("--evidence", action="append", required=True)
     session_parser.add_argument("--branch")
     session_parser.add_argument("--pr")
+    session_parser.add_argument("--supersedes")
+    session_parser.add_argument("--trigger", choices=TRIGGERS)
+    session_parser.add_argument("--session-id")
+    session_parser.add_argument("--source-commit")
     session_parser.add_argument("--confirm", action="store_true")
 
     query_parser = subparsers.add_parser("query", help="query current, historical, or decision context")
@@ -1561,6 +1998,7 @@ def main(argv: list[str] | None = None) -> int:
     query_parser.add_argument("--valid-at")
     query_parser.add_argument("--known-at")
     query_parser.add_argument("--decision")
+    query_parser.add_argument("--consent", choices=("auto", "manual"))
 
     merge_parser = subparsers.add_parser(
         "merge-driver", help="git merge driver for vault notes (%%O %%A %%B %%P)"
@@ -1583,6 +2021,34 @@ def main(argv: list[str] | None = None) -> int:
 
     vault_parser = subparsers.add_parser("vault", help="manage configured vaults")
     vault_parser.add_argument("action", choices=("list",))
+
+    auto_parser = subparsers.add_parser("auto", help="manage auto mode (standing consent)")
+    auto_parser.add_argument("action", choices=("enable", "disable", "status"))
+    auto_parser.add_argument("--vault-name")
+
+    withdraw_parser = subparsers.add_parser(
+        "withdraw", help="append a tombstone correcting a wrong record"
+    )
+    withdraw_parser.add_argument("--record", required=True)
+    withdraw_parser.add_argument("--reason", required=True)
+    withdraw_parser.add_argument("--vault")
+    withdraw_parser.add_argument("--vault-name")
+    withdraw_parser.add_argument("--agent")
+    withdraw_parser.add_argument("--confirm", action="store_true")
+
+    retract_parser = subparsers.add_parser(
+        "retract", help="remove a record from the current tree (safe revert; not a history rewrite)"
+    )
+    retract_parser.add_argument("--record", required=True)
+    retract_parser.add_argument(
+        "--remove-from-current-tree",
+        action="store_true",
+        help="required: names exactly what happens — the record leaves the current tree; history is preserved",
+    )
+    retract_parser.add_argument("--vault")
+    retract_parser.add_argument("--vault-name")
+    retract_parser.add_argument("--grace-minutes", type=int, default=10)
+    retract_parser.add_argument("--confirm", action="store_true")
     args = parser.parse_args(argv)
 
     try:
@@ -1622,12 +2088,16 @@ def main(argv: list[str] | None = None) -> int:
             workspace_path = Path(args.workspace) if args.workspace else Path(".")
             sync_map: dict[str, Any] = {}
             project_note: dict[str, Any] | None = None
+            routed_entry: dict[str, Any] | None = None
+            routed_config: dict[str, Any] | None = None
             if args.vault:
                 notes_root = Path(args.vault).expanduser().resolve() / "codex-context"
             else:
                 config = load_config()
+                routed_config = config
                 if args.vault_name:
                     entry = _vault_by_name(config, args.vault_name)
+                    routed_entry = entry
                     if entry.get("sync") == "git":
                         sync_map[args.vault_name] = sync_read(entry["path"])
                     notes_root = entry["path"] / "codex-context"
@@ -1642,6 +2112,7 @@ def main(argv: list[str] | None = None) -> int:
                         vault_name, project_note = find_project_across_vaults(
                             config, workspace_path
                         )
+                    routed_entry = config["vaults"][vault_name]
                     notes_root = config["vaults"][vault_name]["path"] / "codex-context"
             if args.command == "query" and args.mode == "provenance":
                 payload = decision_provenance(
@@ -1658,6 +2129,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if sync_map:
                 payload["sync"] = sync_map
+            if routed_entry is not None and routed_config is not None:
+                payload["vault_mode"] = vault_mode(routed_config, routed_entry)
+            if getattr(args, "consent", None):
+                want_auto = args.consent == "auto"
+                for section in ("current_facts", "active_decisions", "recent_sessions"):
+                    if section in payload:
+                        payload[section] = [
+                            item
+                            for item in payload[section]
+                            if (item.get("consent") == "auto") == want_auto
+                        ]
             _emit(payload)
             return 0
         if args.command == "propose-fact":
@@ -1678,6 +2160,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "record-fact":
             entry, vault_path, config = _write_target(args.vault, args.vault_name, args.project)
+            auto_ctx = _auto_write_context(config, entry, args, "fact")
+            if auto_ctx["skip"]:
+                _emit(auto_ctx["skip"])
+                return 0
             stamp = _attribution(config, entry, args.agent)
             note = record_fact(
                 vault_path,
@@ -1687,19 +2173,27 @@ def main(argv: list[str] | None = None) -> int:
                 args.value,
                 args.valid_from,
                 args.evidence,
-                args.confirm,
+                auto_ctx["confirm"],
                 valid_to=args.valid_to,
                 supersedes=args.supersedes,
                 cardinality=args.cardinality,
                 repos=_record_repos(args.workspace, args.repo),
                 author=stamp.get("author"),
                 agent=stamp.get("agent"),
+                extra=auto_ctx["extra"],
             )
             result = {"path": str(note)}
+            if auto_ctx["session_id"]:
+                result["session_id"] = auto_ctx["session_id"]
+            sync_result = None
             if entry.get("sync") == "git":
-                result["sync"] = sync_push(
+                sync_result = sync_push(
                     vault_path, [note], f"record fact: {args.subject} {args.relation}"
                 )
+                result["sync"] = sync_result
+            _ledger_record_write(
+                auto_ctx, entry, vault_path, note, sync_result, args.workspace, None
+            )
             _emit(result)
             return 0
         if args.command == "propose-decision":
@@ -1719,6 +2213,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "record-decision":
             entry, vault_path, config = _write_target(args.vault, args.vault_name, args.project)
+            auto_ctx = _auto_write_context(config, entry, args, "decision")
+            if auto_ctx["skip"]:
+                _emit(auto_ctx["skip"])
+                return 0
             stamp = _attribution(config, entry, args.agent)
             note = record_decision(
                 vault_path,
@@ -1728,16 +2226,24 @@ def main(argv: list[str] | None = None) -> int:
                 args.alternative,
                 args.rationale,
                 args.evidence,
-                confirm=args.confirm,
+                confirm=auto_ctx["confirm"],
                 status=args.status,
                 supersedes=args.supersedes,
                 repos=_record_repos(args.workspace, args.repo),
                 author=stamp.get("author"),
                 agent=stamp.get("agent"),
+                extra=auto_ctx["extra"],
             )
             result = {"path": str(note)}
+            if auto_ctx["session_id"]:
+                result["session_id"] = auto_ctx["session_id"]
+            sync_result = None
             if entry.get("sync") == "git":
-                result["sync"] = sync_push(vault_path, [note], f"record decision: {args.title}")
+                sync_result = sync_push(vault_path, [note], f"record decision: {args.title}")
+                result["sync"] = sync_result
+            _ledger_record_write(
+                auto_ctx, entry, vault_path, note, sync_result, args.workspace, None
+            )
             _emit(result)
             return 0
         if args.command == "propose-session":
@@ -1756,6 +2262,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "record-session":
             entry, vault_path, config = _write_target(args.vault, args.vault_name, args.project)
+            auto_ctx = _auto_write_context(config, entry, args, "session")
+            if auto_ctx["skip"]:
+                _emit(auto_ctx["skip"])
+                return 0
             stamp = _attribution(config, entry, args.agent)
             note = record_session(
                 vault_path,
@@ -1764,16 +2274,25 @@ def main(argv: list[str] | None = None) -> int:
                 args.blocker,
                 args.next_step,
                 args.evidence,
-                confirm=args.confirm,
+                confirm=auto_ctx["confirm"],
                 branch=args.branch,
                 pr=args.pr,
                 repos=_record_repos(args.workspace, args.repo),
+                supersedes=args.supersedes,
                 author=stamp.get("author"),
                 agent=stamp.get("agent"),
+                extra=auto_ctx["extra"],
             )
             result = {"path": str(note)}
+            if auto_ctx["session_id"]:
+                result["session_id"] = auto_ctx["session_id"]
+            sync_result = None
             if entry.get("sync") == "git":
-                result["sync"] = sync_push(vault_path, [note], f"record session: {args.project}")
+                sync_result = sync_push(vault_path, [note], f"record session: {args.project}")
+                result["sync"] = sync_result
+            _ledger_record_write(
+                auto_ctx, entry, vault_path, note, sync_result, args.workspace, args.supersedes
+            )
             _emit(result)
             return 0
         if args.command == "merge-driver":
@@ -1809,10 +2328,65 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "identity": config.get("identity"),
                     "vaults": {
-                        name: {"path": str(entry["path"]), "sync": entry.get("sync")}
+                        name: {
+                            "path": str(entry["path"]),
+                            "sync": entry.get("sync"),
+                            "mode": vault_mode(config, entry),
+                        }
                         for name, entry in config["vaults"].items()
                     },
                 }
+            )
+            return 0
+        if args.command == "auto":
+            if args.action == "status":
+                _emit(auto_status(load_config()))
+                return 0
+            mode = "auto" if args.action == "enable" else "manual"
+            _emit(set_vault_mode(mode, vault_name=args.vault_name))
+            return 0
+        if args.command == "withdraw":
+            config = load_config()
+            stem = Path(args.record).stem
+            entry, vault_path = _find_record_vault(config, stem, args.vault, args.vault_name)
+            mode = vault_mode(config, entry)
+            stamp = _attribution(config, entry, args.agent)
+            note = withdraw_record(
+                vault_path,
+                args.record,
+                args.reason,
+                args.confirm or mode == "auto",
+                author=stamp.get("author"),
+                agent=stamp.get("agent"),
+                consent="auto" if mode == "auto" else None,
+            )
+            result = {"path": str(note), "withdraws": stem}
+            if entry.get("sync") == "git":
+                result["sync"] = sync_push(vault_path, [note], f"withdraw: {stem}")
+            _emit(result)
+            return 0
+        if args.command == "retract":
+            if not args.remove_from_current_tree:
+                raise ValueError(
+                    "retract requires --remove-from-current-tree; for ordinary "
+                    "corrections use `withdraw`"
+                )
+            config = load_config()
+            stem = Path(args.record).stem
+            entry, vault_path = _find_record_vault(config, stem, args.vault, args.vault_name)
+            if entry.get("sync") != "git":
+                raise ContextVaultError(
+                    "retract applies to git-synced vaults; for a local-only vault "
+                    "just use `withdraw`"
+                )
+            mode = vault_mode(config, entry)
+            _emit(
+                retract_record(
+                    vault_path,
+                    args.record,
+                    args.confirm or mode == "auto",
+                    grace_minutes=args.grace_minutes,
+                )
             )
             return 0
     except (ContextVaultError, ValueError) as exc:

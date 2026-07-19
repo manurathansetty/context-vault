@@ -203,3 +203,39 @@ sessions. Treat each marker as a startup chore: read the transcript it points
 to, build a `propose-session` recap, show it to the user, record only after
 their explicit approval, then delete the marker file. Never record a marker's
 recap without approval.
+
+## Auto mode (v0.4, experimental, default off)
+
+Auto mode is standing consent: for vaults where the user has run
+`auto enable`, record WITHOUT pausing for approval — but always show what was
+recorded. Check state with `auto status` (also injected at session start).
+Manual-mode vaults keep the full propose → approve protocol.
+
+Recording protocol in auto mode:
+
+- Pass `--workspace "$PWD"` as usual. On your first record the CLI returns a
+  `session_id` — reuse it (`--session-id`) on every later record this session
+  so checkpoints chain and dedup works.
+- Record at these moments (`--trigger`): an artifact milestone lands
+  (`milestone` — schema generated, endpoint working, tests green), a decision
+  settles (`decision`), a code commit you're nudged about (`git-commit` with
+  `--source-commit <sha>`), before compaction (`precompact`), and when work
+  concludes (`wrapup` — REQUIRED before the session ends; hooks only detect a
+  missing wrap-up, they cannot write it for you).
+- Chain checkpoints: each session record passes `--supersedes
+  <previous-checkpoint-stem>` so briefs show one record per session.
+- Facts/decisions: pass `--basis observed|inferred|user-stated` honestly
+  (default is `inferred`, the lowest-trust label).
+- `--confirm` is unnecessary in auto mode; never claim a human reviewed an
+  auto record — `consent: auto` is visible to every reader by design.
+
+Corrections (any mode):
+
+- Wrong record → `withdraw --record <stem> --reason "..."`: append-only
+  tombstone; hides it from current state, preserves temporal history.
+- Just-written mistake (≤10 min, record-only commit) →
+  `retract --record <stem> --remove-from-current-tree`: safe revert; history
+  and pulled clones still retain it — say so if asked.
+- Leaked credential → tell the user to ROTATE IT FIRST (vault presence =
+  compromised), then withdraw; history cleanup is a coordinated team
+  operation, not a command.

@@ -16,7 +16,24 @@ from pathlib import Path
 BRIEF_TIMEOUT_SECONDS = 90
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import auto_mode_active  # noqa: E402
 from session_end import cleanup, markers_dir  # noqa: E402
+
+
+def run_auto_status() -> str | None:
+    try:
+        result = subprocess.run(
+            [sys.executable, str(cli_path()), "auto", "status"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return result.stdout.strip()
 
 
 def cli_path() -> Path:
@@ -86,6 +103,14 @@ def main() -> int:
     marker_text = pending_marker_text(directory)
     if marker_text:
         sections.append(marker_text)
+    if auto_mode_active():
+        digest = run_auto_status()
+        if digest:
+            sections.append(
+                "Context Vault auto mode is ON (standing consent; record at "
+                "milestones without pausing for approval; wrap up before ending). "
+                "Status digest:\n" + digest
+            )
     if not sections:
         return 0
     print(

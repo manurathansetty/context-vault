@@ -39,6 +39,7 @@ REQUIRED = {
         "evidence",
     ),
     "session": ("id", "type", "project", "next_step", "recorded_at", "evidence"),
+    "withdrawal": ("id", "type", "withdraws", "reason", "recorded_at"),
 }
 
 
@@ -92,9 +93,21 @@ def append_only_violations(root: Path, diff_range: str) -> list[str]:
             folder in segments for folder in RECORD_FOLDERS
         )
         if is_record and (status.startswith("M") or status.startswith("D")):
+            if status.startswith("D"):
+                # A deletion by a recognized `retract:` commit is the sanctioned
+                # remove-from-current-tree path, not an append-only violation.
+                subjects = subprocess.run(
+                    ["git", "-C", str(root), "log", "--format=%s", diff_range, "--", path],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                ).stdout.splitlines()
+                if any(subject.startswith("retract:") for subject in subjects):
+                    continue
             problems.append(
                 f"{path}: record was {'modified' if status.startswith('M') else 'deleted'} "
-                "— records are append-only; correct with a superseding record (HIGH SEVERITY)"
+                "— records are append-only; correct with a superseding record or "
+                "`withdraw` (HIGH SEVERITY)"
             )
     return problems
 
