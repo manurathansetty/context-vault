@@ -2,10 +2,24 @@
 
 ## Status
 
-Draft for review, 2026-07-19. Direction agreed in discussion; pillar order and
-per-pillar scope need maintainer's sign-off before any implementation plan is
-written. Prerequisites (v2.1 topic layer, capture hooks) are approved
-separately and are not part of this document's scope.
+Revised 2026-07-19 after external design review
+(`2026-07-19-context-vault-v3-review.md`): direction approved; the review's
+P0 resolutions are folded in below — core-enforced approval (no
+`confirm`-boolean writes over MCP), vault-scope policy, pending-store
+contract, revision-safe indexing — and the delivery order now follows the
+review's core-first sequence. Prerequisites (v2.1 topic layer, capture hooks)
+are approved separately; their specs/plans must be linked, with required APIs
+and acceptance checks, at the top of each v3 implementation plan.
+
+## Core policy layer (new, from review)
+
+MCP clients and capture hooks are **untrusted input devices**. The Context
+Vault core — not a model instruction, an MCP annotation, or a `confirm`
+boolean — enforces: vault scope; the proposal→approval lifecycle; payload
+integrity between approval and write; client-asserted provenance labeling;
+routing/topic revalidation at write time; and v2's append-only/no-loss
+behavior. Every integration (CLI, skills, MCP, hooks) is a thin adapter over
+this one core. This layer is built first, with adversarial tests.
 
 ## Framing
 
@@ -13,11 +27,14 @@ separately and are not part of this document's scope.
   gate).
 - **v2** made memory *shared* (team vaults, locked git sync, attribution,
   disputes, no-loss conflicts).
-- **v3** makes memory *self-sustaining and ubiquitous*: useful at volume
-  (retrieval), available to any agent (MCP), and populated without depending
-  on anyone's discipline (ambient capture) — all without weakening the two
-  load-bearing invariants: **the vault is human-readable Markdown** and
-  **nothing enters it without human approval**.
+- **v3** makes memory *self-sustaining*: useful at volume (retrieval) and
+  populated without depending on anyone's discipline (ambient capture) — all
+  without weakening the two load-bearing invariants: **the vault is
+  human-readable Markdown** and **nothing enters it without human approval**.
+  (An MCP server was designed as a third pillar and is **deferred by
+  decision**, 2026-07-19: the team runs entirely on Claude Code and Codex,
+  whose adapters already exist. The hardened design below is kept for the day
+  a different host enters the toolchain.)
 
 ## Prerequisites (approved, pre-v3)
 
@@ -34,12 +51,18 @@ repo facets; V3C upgrades the marker queue into a draft queue.
 
 ---
 
-## V3A — MCP server: memory for any agent
+## Deferred — MCP server: memory for any agent (NOT in v3 scope)
 
-**Problem.** v2 reaches agents through hand-written adapters (Codex skill,
-Claude Code plugin). Every other tool — Cursor, Windsurf, custom Pydantic AI
-agents, a teammate's setup — is locked out. For a product aimed at dev teams,
-per-harness adapters do not scale; MCP is the standard everyone speaks.
+**Deferred 2026-07-19 (maintainer):** the team uses only Claude Code and Codex;
+the existing adapters are sufficient. Revisit when a non-Claude/Codex agent
+actually needs vault access. The design below (including the review-hardened
+approval-token and vault-scope model) is preserved so that revisit starts
+warm, not cold. No MCP code is built until then.
+
+**Problem it would solve.** v2 reaches agents through hand-written adapters
+(Codex skill, Claude Code plugin). Other tools — Cursor, Windsurf, custom
+Pydantic AI agents — are locked out. Per-harness adapters do not scale; MCP
+is the standard everyone speaks.
 
 **Design.**
 
@@ -52,23 +75,43 @@ per-harness adapters do not scale; MCP is the standard everyone speaks.
   vault_propose_session`, `vault_record_fact / vault_record_decision /
   vault_record_session` (each requiring `confirm: true`), `vault_doctor()`,
   `vault_sync()`, `vault_list()`.
-- **The consent gate maps onto MCP's approval model.** Propose tools are
-  read-only annotated; record tools are destructive-annotated so every host
-  surfaces a human approval prompt. Server instructions carry the write
-  protocol (propose → show → approve → record) and the team-vault
-  presentation rules (claimed attribution, dispute display, visibility
-  warning), so hosts without our skill still behave correctly.
-- Identity/agent stamping: same config file; the `agent` stamp comes from the
-  MCP client name in the `initialize` handshake (e.g., `cursor`), overridable
-  by env.
+- **Approval is enforced by the core, not asserted by the client** (review
+  P0-1). A `confirm: true` parameter proves nothing — a model can supply it.
+  Instead: `vault_propose_*` stores the proposal locally and returns a
+  `proposal_id` plus canonical payload hash; a human approves that exact
+  proposal through a **local interactive step** (CLI review flow); approval
+  mints a short-lived token bound to (proposal id, payload hash, vault,
+  project); `vault_record_*` accepts only that token and revalidates routing,
+  topic status, and identity at write time. Because no current host produces
+  a trustworthy approval receipt, **the MCP server ships read-only by
+  default**; write tools activate only with the token flow, and host-side
+  annotations remain hints, never the boundary.
+- **Vault-scope policy** (review P0-2): reads default to the vault the
+  workspace routes to; the personal vault and any other team vault are
+  invisible to an MCP client unless explicitly scoped in local config.
+  Cross-vault entity queries require an explicit all-vault scope and never
+  silently blend personal and team context. Write, sync, and vault-listing
+  scopes are separate from read scope. Requested scopes are logged in runtime
+  output only — never into Markdown records.
+- Identity/agent stamping: same config file; the `agent` label from the MCP
+  `initialize` handshake is normalized, length-bounded, and persisted as
+  **client-asserted** provenance — absent/malformed values become `unknown`,
+  and nothing presents it as verified identity (review P1-2).
+- Compatibility is a defined subset, not an aspiration (review P1-1): the
+  spec for v3A lists the exact MCP capabilities implemented (initialize/
+  version negotiation, tool listing/schemas, call results, errors,
+  cancellation), the server core is isolated from CLI rendering, and
+  conformance tests run against Codex before any unknown-host claim.
 - Registration is one command per host (`claude mcp add`, Cursor/Windsurf
   config JSON); the existing skills remain the richer integration for Codex
   and Claude Code.
 
-**Success criteria.** An agent in a host we never wrote an adapter for can:
-get a correct brief for a workspace, walk the propose→approve→record flow with
-the host's own approval UI, and land an attributed, synced record in a team
-vault — with no Context Vault code installed beyond the MCP server entry.
+**Success criteria.** An agent in a host we never wrote an adapter for gets a
+correct, properly scoped brief with no Context Vault code beyond the MCP
+entry; a write is impossible without a human completing the local approval
+step for that exact payload; an adversarial client (fabricated confirm flags,
+replayed or mismatched tokens, out-of-scope vault requests) is refused in
+tests.
 
 ## V3B — Retrieval intelligence: briefs that survive volume
 
@@ -93,17 +136,34 @@ growth pressure is sessions, decisions, and fact count per topic.)
 - **Cross-topic entity queries:** `query --entity "[[Auth service]]"`
   searches every project and vault for records referencing an entity
   wiki-link, grouped by topic — "everything we know about the auth service"
-  regardless of where it was recorded.
-- **Derived local index (v1's promise, finally needed):** a rebuildable index
-  in the config dir (never in the vault) keyed by file mtime, so focused
-  briefs stay fast on large vaults. Canonical data remains the Markdown; the
-  index can be deleted at any time. Embeddings remain out of scope until
-  lexical ranking demonstrably fails.
+  regardless of where it was recorded. Link matching normalizes target and
+  `[[target|alias]]` forms while preserving the displayed link, and reports
+  unresolved or ambiguous entities explicitly instead of silently missing
+  them (review P2-1). Cross-vault entity queries obey the v3A scope policy.
+- **Deterministic ranking contract** (review P1-3): the implementation plan
+  specifies tokenization, Unicode and wiki-link normalization, fields
+  searched, field/type weights, the recency curve, tie-breakers, and budget
+  selection order — verified against golden fixture vaults so ranking changes
+  are always intentional. Non-droppable safety classes: active disputes,
+  active decisions, repair chores, and sync/staleness warnings.
+- **Revision-safe derived index** (review P0-4; v1's disposable-index
+  promise, finally needed): a rebuildable index in the config dir (never in
+  the vault) whose correctness key is the vault's current `HEAD` plus
+  per-file content hashes — mtimes are not trustworthy across git checkouts
+  and fast-forwards. `mtime_ns`+size serve only as a fast invalidation hint
+  before hashing. Rebuilds are atomic and hold the existing per-vault lock;
+  when revision identity cannot be established, the brief falls back to a
+  direct scan and says so. Canonical data remains the Markdown; the index can
+  be deleted at any time. Embeddings stay out of scope until lexical ranking
+  demonstrably fails.
 
-**Success criteria.** On a vault with thousands of records, a focused brief
-returns in under a second, fits in a screen, always includes active disputes
-and the topic's active decisions, states exactly what it omitted — and a
-cold-start entity query answers "what do we know about X" across topics.
+**Success criteria.** Stated at the right boundary (review P1-4): local
+focused-brief queries hit a p95 under one second on a stated fixture corpus
+and hardware envelope, measured after sync and separately from cold-index
+build time; the brief fits in a screen, always includes the safety classes,
+states exactly what it omitted; a stale index can never surface a retired
+decision or hide an active dispute (revision-key tests cover checkout,
+fast-forward, and concurrent-process races).
 
 ## V3C — Ambient capture: a review queue instead of discipline
 
@@ -117,41 +177,68 @@ memory about memory.
   leaving a marker to producing a *draft* — a headless summarization pass over
   the transcript writes a proposed session recap (and any candidate facts or
   decisions it noticed) into `~/.config/context-vault/pending/`. Drafts are
-  plain JSON proposals: never synced, never in the vault, auto-expired after
-  30 days.
+  plain JSON proposals: never synced, never in the vault.
+- **The pending store is a sensitive datastore with a contract** (review
+  P0-3): directory created `0700` with exclusive file creation; secret
+  redaction runs **before** anything is written (the vault's sensitive
+  patterns, broadened, plus a local deny-list); every draft carries source
+  session ID, host, workspace, creation timestamp, payload hash, and a draft
+  schema version; repeated SessionEnd events deduplicate on session ID;
+  `review purge` deletes everything on demand and expiry cleanup runs at
+  CLI-invocation time (hooks alone can't be trusted to fire after crashes);
+  the docs state plainly that pending drafts are unencrypted local files the
+  user's backup tooling may capture.
 - **Batch review:** a `review` command lists pending drafts; the skill/MCP
   instructions have the agent present them in one batch ("3 drafts from
   yesterday — approve, edit, or drop each"). Approve → normal `record-*
-  --confirm` with full stamping; drop → delete. The consent gate is intact —
-  the *drafting* is ambient, the *writing* never is.
+  --confirm` with full stamping, after **revalidating** routing, topic
+  status, identity, and team configuration at approval time — a draft from
+  Tuesday must not silently write into a project that was retired Wednesday.
+  Drop → delete. The consent gate is intact — the *drafting* is ambient, the
+  *writing* never is.
+- **Best-effort by design** (review P1-5): session-end hooks are skipped by
+  crashes, sleep, and unsupported hosts, so coverage is never claimed to be
+  complete. Source-session IDs make capture idempotent, the next-session
+  marker remains as fallback, and the review surface reports known gaps
+  honestly rather than implying totality.
+- **Auto-record is standing consent, narrowly scoped** (review P1-6): the
+  `auto_record: ["session"]` opt-in is recorded as an explicit standing
+  approval — records it produces are stamped with the consent policy and its
+  origin, revocation is one config edit, **team vaults are excluded from
+  automatic writes in v3** (personal vault only), and facts/decisions remain
+  per-item human approvals permanently.
 - **Cheap and skippable:** drafting only runs for sessions above a substance
   threshold (same heuristic as the Tier-2 marker), and a config switch turns
   ambient drafting off entirely, falling back to markers.
-- Auto-record (`auto_record: ["session"]`) remains a per-user opt-in for
-  recaps only; facts and decisions can never be auto-recorded, by design.
 
 **Success criteria.** After a week of normal work with zero mid-session
-interruptions, the morning review shows a complete, correct queue of what
-happened; approving it takes under a minute; nothing entered any vault without
-that approval.
+interruptions, the morning review shows a correct queue of what was captured
+— with any coverage gaps stated, not hidden; approving it takes under a
+minute; nothing entered any vault without that approval or a stamped standing
+consent; no draft ever contains an unredacted secret in fixture tests.
 
 ---
 
-## Delivery sequence
+## Delivery sequence (revised: two pillars, review-ordered)
 
-1. **V3A (MCP)** first: self-contained, no data-volume prerequisite, and it is
-   distribution — it changes what Context Vault *is* (a memory layer any agent
-   plugs into, not a plugin for two CLIs).
-2. **V3B (retrieval)** second, once dogfooding has produced enough volume for
-   ranking to be testable against real briefs.
-3. **V3C (ambient)** last, after the Tier-1/2 hook experience shows where the
-   friction actually is.
+1. **V3B (retrieval)** first, once dogfooding has produced enough volume for
+   ranking to be testable against real briefs: revision-safe index and the
+   deterministic ranking contract with golden fixtures, then focused briefs
+   and entity queries.
+2. **V3C (ambient)** second, after the Tier-1/2 hook experience shows where
+   the friction actually is: the pending-store contract first, then
+   best-effort drafting and batch review.
+
+The MCP pillar re-enters this sequence only if a non-Claude/Codex host joins
+the toolchain — and then read-only first, with writes gated on the core
+approval-token flow per the review.
 
 Each pillar gets its own spec-level review and implementation plan before
 work starts; this document is direction, not an implementation contract.
 
 ## Out of scope for v3 (bench)
 
+- **MCP server** (deferred by decision — design preserved above).
 - Code-host adapters (live PR merge state, webhook bot recording merges).
 - Verified identity (signed commits mapped to team identities).
 - Consumption surfaces: Slack digests, a native Obsidian plugin UI, web
