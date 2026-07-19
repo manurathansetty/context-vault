@@ -2,9 +2,10 @@
 
 ## Status
 
-Revised 2026-07-19 after two external review rounds
+Revised 2026-07-19 after three external review rounds
 (`2026-07-19-context-vault-v3-review.md`,
-`2026-07-19-context-vault-v3-review-followup.md`): direction approved; both
+`2026-07-19-context-vault-v3-review-followup.md`,
+`2026-07-19-context-vault-v3-review-round3.md`): direction approved; all
 rounds' resolutions are folded in below — the honest approval boundary,
 summarization execution contract, core scope policy, pending-store contract,
 revision-safe indexing. Prerequisites (v2.1 topic layer, capture hooks) are
@@ -21,23 +22,39 @@ client-asserted provenance labeling; routing/topic revalidation at write
 time; and v2's append-only/no-loss behavior. Every integration (CLI, skills,
 hooks) is a thin adapter over this one core.
 
-**Honesty about approval (follow-up review P0):** for interactive adapters,
-human approval is a *protocol*, not a CLI-enforceable boundary. The CLI
-cannot distinguish who supplied `--confirm`; a shell-capable agent could
-invoke it unprompted. What actually holds the gate today: the skill's write
-protocol, the host's command-permission prompts, and the user's presence.
-The *enforceable* human-hands boundary — an interactive confirmation or a
-user-typed `approve <id>` that mints a short-lived token bound to the
-proposal's payload hash — is introduced with V3C's review flow, where
-automation volume demands it, and would gate any revived MCP writes. No
-document or output may describe interactive `--confirm` writes as
-core-enforced.
+**Honesty about approval (review rounds 2–3):** on a single-user machine, an
+agent with the user's shell has the user's authority — **no mechanism
+Context Vault builds locally can be a hard boundary against it**, tokens and
+prompts included (a shell-capable agent can run `approve <id>` or allocate a
+pseudo-TTY just as it can pass `--confirm`). The threat model is therefore
+explicit: local mechanisms defend against the *realistic* adversary — a
+confused or overeager agent — while *enforcement* against a genuinely
+misbehaving agent belongs to the host layer, which Context Vault composes
+with rather than pretends to replace. Concretely:
 
-**Scope policy is core, not an MCP concern (follow-up review P1):** reads
+- The **approval token** (V3C) is an *integrity and audit* mechanism: it
+  binds an approval to the exact payload bytes, expires quickly, and is
+  single-use — killing content drift, replay, and stale approvals. It is a
+  user/host protocol, not proof of human hands.
+- The **trusted approval surfaces** are host-native and outside the agent's
+  command channel: the host's own command-permission prompt (the user's
+  click in Claude Code/Codex), and host sandbox/permission deny rules —
+  e.g., denying the agent's shell access to the personal-vault path and the
+  pending store. Docs ship the recommended deny-rule configuration. (A
+  separate biometric-gated approval app is the future option if true local
+  enforcement is ever required.)
+- No document or output may describe `--confirm`, tokens, or scope flags as
+  core-enforced against an agent.
+
+**Scope policy is core, not an MCP concern (review rounds 2–3):** reads
 default to the vault the workspace routes to; cross-vault queries require an
-explicit `--all-vaults` opt-in; personal and team context are never silently
-blended. This applies to the Claude Code and Codex adapters today, not only
-to hypothetical future transports. Write, sync, and vault-enumeration scopes
+explicit `--all-vaults` opt-in, which works **only for vaults granted in the
+local per-vault allowlist** (restored from the deferred MCP design; personal
+vaults are never granted by default). Personal and team context are never
+silently blended. This applies to the Claude Code and Codex adapters today.
+The allowlist is itself a local file — a mistake-catcher against agent
+confusion, not a wall against agent intent; the wall, where needed, is a
+host deny rule on the vault path. Write, sync, and vault-enumeration scopes
 are separate from read scope.
 
 **Minimum shared core** — routing, scope enforcement, and these approval
@@ -229,10 +246,13 @@ memory about memory.
 - **Batch review:** a `review` command lists pending drafts; the skill
   instructions have the agent present them in one batch ("3 drafts from
   yesterday — approve, edit, or drop each"). **Approving a queued draft is a
-  human-hands action** (follow-up review P0): an interactive confirmation or
-  a user-typed `approve <draft-id>` mints a short-lived token bound to the
+  user/host protocol hardened by tokens** (review round 3): a user-typed
+  `approve <draft-id>` mints a short-lived, single-use token bound to the
   draft's payload hash, and the queued-draft record path accepts only that
-  token — a shell-capable agent cannot approve its own drafts. Recording
+  token — guaranteeing the bytes written are the bytes approved, and making
+  each approval a discrete auditable act. This deters and audits agent
+  confusion; it is not proof of human hands (see the core policy section for
+  the trusted surfaces that are). Recording
   then proceeds with full stamping, after **revalidating** routing, topic
   status, identity, and team configuration at approval time — a draft from
   Tuesday must not silently write into a project that was retired Wednesday.
