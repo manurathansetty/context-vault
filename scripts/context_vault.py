@@ -1468,6 +1468,16 @@ def decision_provenance(
         and decision_selector
         in {str(note["metadata"].get("id")), str(note["metadata"].get("title"))}
     ]
+    # Provenance is a view of a decision, not an escape hatch around temporal
+    # visibility. A decision recorded after known_at (or withdrawn in the
+    # current view) must be as unavailable here as it is in a brief.
+    matches = _known_by(matches, known_at)
+    matches = _apply_withdrawal_rule(
+        matches,
+        _withdrawals(notes_root),
+        historical=valid_at is not None or known_at is not None,
+        known_at=known_at,
+    )
     if len(matches) != 1:
         raise DecisionNotFoundError(f"expected one decision matching {decision_selector!r}")
     brief = build_brief(notes_root, workspace, valid_at, known_at, project_note)

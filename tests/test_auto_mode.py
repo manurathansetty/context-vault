@@ -671,6 +671,24 @@ class ProductionHardeningTests(AutoModeBase):
         self.assertEqual(pinned["active_decisions"][0]["title"], "Early call")
         self.assertEqual(pinned["recent_sessions"], [])
 
+    def test_provenance_excludes_a_decision_not_known_at_the_pinned_time(self) -> None:
+        vault = self.root / "vault-provenance-time"
+        workspace = self.root / "ws-provenance-time"
+        workspace.mkdir()
+        context_vault.record_project(vault, "PT", [str(workspace)], "Provenance", [], True)
+        context_vault.record_decision(
+            vault, "pt", "Later call", "B", [], "reason", ["e"], confirm=True,
+            recorded_at="2026-07-19T00:00:00+00:00",
+        )
+
+        with self.assertRaises(context_vault.DecisionNotFoundError):
+            context_vault.decision_provenance(
+                vault / "codex-context",
+                workspace,
+                "Later call",
+                known_at=context_vault._parse_recorded_at("2026-07-15T00:00:00+00:00"),
+            )
+
     def test_withdrawal_not_leaked_before_its_known_time(self) -> None:
         vault = self.root / "vault-wl"
         workspace = self.root / "ws-wl"
