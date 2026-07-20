@@ -1,2 +1,8 @@
 __pycache__/
 *.py[cod]
+.DS_Store
+
+# Internal process docs — kept local, not published
+docs/superpowers/plans/
+docs/superpowers/specs/*review*.md
+.dev-transcript/
