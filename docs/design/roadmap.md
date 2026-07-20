@@ -1,17 +1,13 @@
-# Context Vault v3 — Design Plan
+# Roadmap — Retrieval & Ambient Capture (post-v0.4)
 
 ## Status
 
-Revised 2026-07-19 after three external review rounds
-(`2026-07-19-context-vault-v3-review.md`,
-`2026-07-19-context-vault-v3-review-followup.md`,
-`2026-07-19-context-vault-v3-review-round3.md`): direction approved; all
-rounds' resolutions are folded in below — the honest approval boundary,
-summarization execution contract, core scope policy, pending-store contract,
-revision-safe indexing. Prerequisites are specified and implemented:
-[topic layer v2.1](2026-07-19-topic-layer-v2.1-design.md),
-[capture hooks](2026-07-19-capture-hooks-design.md), shared plan
-[`../plans/2026-07-19-topic-layer-and-hooks.md`](../plans/2026-07-19-topic-layer-and-hooks.md).
+Direction approved; not yet implemented. Hardened across three external
+review rounds, whose resolutions are folded in below — the honest approval
+boundary, the summarization execution contract, the core scope policy, the
+pending-store contract, and revision-safe indexing. Prerequisites (topics,
+repo facets, capture hooks) shipped in
+[v0.3](v0.3-topics-and-hooks.md).
 
 ## Core policy layer and the approval boundary
 
@@ -270,7 +266,7 @@ memory about memory.
   automatic writes in v3** (personal vault only), and facts/decisions remain
   per-item human approvals permanently.
   **[Amended by v0.4]** The Auto Mode design
-  (`2026-07-19-auto-mode-v0.4-design.md`, supersession matrix) explicitly
+  ([v0.4-auto-mode.md](v0.4-auto-mode.md), supersession matrix) explicitly
   supersedes this clause's scoping for opted-in users: all record types, team
   vaults included, per-member `auto enable`, `consent: auto` stamped.
   Manual-mode users remain governed by this clause.

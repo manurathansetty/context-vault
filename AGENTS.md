@@ -13,19 +13,18 @@ the product truth.
 ## Getting context, in order
 
 1. **README.md** — what the product does and every user-facing command.
-2. **`docs/superpowers/specs/`** — the design contracts, spec-first and
+2. **`docs/design/`** — one design contract per version, spec-first and
    review-hardened. Read the one for the area you're touching:
-   - `2026-07-18-codex-obsidian-context-vault-design.md` — v0.1 core: vault
-     layout, bitemporal records, the propose→approve consent gate.
-   - `2026-07-19-cross-team-vault-design.md` — v0.2 team vaults: locked git
-     sync, merge driver, quarantine, attribution, disputes.
-   - `2026-07-19-topic-layer-v2.1-design.md` — topics spanning repos, repo
-     facets, routing.
-   - `2026-07-19-capture-hooks-design.md` — the hook tiers and marker store.
-   - `2026-07-19-context-vault-v3-design.md` — future direction (retrieval,
-     ambient capture) and the honest threat model for approval/consent.
-   - `2026-07-19-auto-mode-v0.4-design.md` — auto mode: standing consent,
-     triggers, ledger, withdraw/retract, plus the full decision log.
+   - `v0.1-personal-vault.md` — the core: vault layout, bitemporal records,
+     the propose→approve consent gate.
+   - `v0.2-team-vaults.md` — locked git sync, merge driver, quarantine,
+     attribution, disputes.
+   - `v0.3-topics-and-hooks.md` — topics spanning repos, repo facets,
+     routing, capture hooks and the marker store.
+   - `v0.4-auto-mode.md` — auto mode: standing consent, triggers, ledger,
+     withdraw/retract, plus the full decision log.
+   - `roadmap.md` — future direction (retrieval, ambient capture) and the
+     honest threat model for approval/consent.
 3. **Tests** (`tests/`) — executable spec. `test_context_vault.py` covers
    v0.1 behavior; `test_team_vault.py` team/topic behavior with real
    two-clone git fixtures; `test_hooks.py` the hook scripts;
@@ -63,9 +62,9 @@ documents — those are intentionally **local-only** (gitignored), not lost.
   messages. Use generic identities (`alex`, `blake`, `alice`) and the GitHub
   handle `manurathansetty` only. History was rewritten once to enforce this;
   don't make it need a second time.
-- **Never commit internal process docs** — `docs/superpowers/plans/`,
-  `docs/superpowers/specs/*review*.md`, `.dev-transcript/`, `codex.md` are
-  gitignored on purpose. Design specs are the only published docs.
+- **Never commit internal process docs** — `docs/superpowers/` (plans,
+  reviews), `.dev-transcript/`, and `codex.md` are gitignored on purpose.
+  The per-version design docs in `docs/design/` are the only published docs.
 - Reads never rebase; writes hold the per-vault lock; hooks never compose
   record content. Keep these invariants when touching the sync engine.
 

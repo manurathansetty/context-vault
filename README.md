@@ -273,9 +273,9 @@ Run `python3 "$CV" --help` for every flag.
   ```
 
 - 📐 **Spec-first** — every version was designed, independently reviewed, and
-  revised before a line of implementation. The design docs — including the
-  decision logs where trade-offs like auto mode's consent model were argued
-  and settled — live in [`docs/superpowers/specs/`](docs/superpowers/specs/).
+  revised before a line of implementation. One design doc per version —
+  including the decision logs where trade-offs like auto mode's consent model
+  were argued and settled — lives in [`docs/design/`](docs/design/).
 
 | Version | Adds |
 |---|---|
