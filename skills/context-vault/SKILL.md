@@ -239,3 +239,18 @@ Corrections (any mode):
 - Leaked credential → tell the user to ROTATE IT FIRST (vault presence =
   compromised), then withdraw; history cleanup is a coordinated team
   operation, not a command.
+
+## Focused retrieval (v0.6)
+
+As a vault fills, prefer targeted retrieval over the full brief:
+
+- `brief --focus "<what you're about to work on>"` ranks and caps each section
+  by relevance (keyword + recency + type), and reports `omitted` counts.
+  Active disputes, decisions, and repair chores are never dropped. Present the
+  focused set; mention omissions if the user needs the full picture.
+- `query --mode entity --entity "[[Auth service]]"` returns every record
+  referencing an entity across all projects in the routed vault, grouped by
+  project — use it for "everything we know about X". Reports `unresolved: true`
+  when nothing matches.
+- The index is transparent (a rebuildable JSON file keyed to vault content);
+  `reindex` forces a rebuild for diagnostics but is never required.

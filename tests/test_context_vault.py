@@ -438,6 +438,41 @@ class ContextVaultTests(unittest.TestCase):
         self.assertEqual(len(brief["active_decisions"]), 1)
         self.assertEqual(brief["active_decisions"][0]["choice"], "Postgres")
 
+    def test_brief_reads_legacy_yaml_decision_frontmatter(self) -> None:
+        context_vault.record_project(
+            self.vault,
+            "Context Vault",
+            [str(self.workspace)],
+            "Make Context Vault a daily-driver",
+            [],
+            True,
+        )
+        fixture = PLUGIN_ROOT / "tests" / "fixtures" / "legacy-yaml-decision.md"
+        decision_path = self.vault / "codex-context" / "decisions" / fixture.name
+        decision_path.parent.mkdir(parents=True, exist_ok=True)
+        decision_path.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+
+        brief = context_vault.build_brief(self.vault / "codex-context", self.workspace)
+
+        self.assertEqual(len(brief["active_decisions"]), 1)
+        decision = brief["active_decisions"][0]
+        self.assertEqual(decision["title"], "Use a dedicated vault at ~/Documents/context-vault")
+        self.assertEqual(decision["alternatives"], ["Keep the vault inside the text_agent repo"])
+        self.assertEqual(decision["evidence"], ["Vault migration in Claude Code session, 2026-07-19"])
+        self.assertIsNone(decision["supersedes"])
+
+    def test_read_note_preserves_json_frontmatter_keys_allowed_by_writer(self) -> None:
+        note = context_vault.write_note(
+            self.vault / "codex-context",
+            "projects",
+            {"id": "custom-field", "custom field": "retained"},
+            "# Custom field",
+        )
+
+        parsed = context_vault.read_note(note)
+
+        self.assertEqual(parsed["metadata"]["custom field"], "retained")
+
     def test_brief_returns_three_newest_project_sessions(self) -> None:
         context_vault.record_project(
             self.vault, "Billing", [str(self.workspace)], "Finish migration", [], True

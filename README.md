@@ -8,7 +8,7 @@ Durable, user-controlled memory for coding agents — plain Markdown in your Obs
 vault, git-backed team sharing, consent-first.
 
 ![Python](https://img.shields.io/badge/Python-stdlib_only-3776AB?logo=python&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-140_passing-2EA44F)
+![Tests](https://img.shields.io/badge/tests-136_passing-2EA44F)
 ![Claude Code](https://img.shields.io/badge/Claude_Code-plugin-D97757)
 ![Codex](https://img.shields.io/badge/Codex-plugin-10A37F)
 ![Obsidian](https://img.shields.io/badge/Obsidian-native_Markdown-7C3AED?logo=obsidian&logoColor=white)
@@ -176,6 +176,15 @@ only correction (`retract` needs git). Git remains the recommended canonical
 transport; full comparison in
 [`docs/design/v0.5-obsidian-sync.md`](docs/design/v0.5-obsidian-sync.md).
 
+### 🔎 Focused retrieval (v0.6)
+
+As a vault fills, `brief --focus "billing webhook bug"` ranks and caps each
+section by relevance (keyword + recency + type) and reports what it omitted —
+active disputes and decisions are never dropped. `query --mode entity --entity
+"[[Auth service]]"` returns everything about one entity across projects. The
+index is a rebuildable JSON file keyed to vault content (no database, no
+embeddings); `reindex` forces a rebuild but is never required.
+
 ## 🧵 Topics across repos
 
 Projects are topics ("Payments revamp"), and one topic may span several code
@@ -302,6 +311,7 @@ Run `python3 "$CV" --help` for every flag.
 | 🧵 v0.3 | Topics across repos, repo facets, one-command onboarding, capture hooks |
 | ⚡ v0.4 | Auto mode: standing consent, milestone checkpoints, idempotency ledger, withdraw/retract |
 | 🟣 v0.5 | Obsidian Sync team-vault transport (experimental; git stays canonical) |
+| 🔎 v0.6 | Retrieval: revision-safe index, focused briefs, entity queries (no database) |
 
 ## 📜 License
 

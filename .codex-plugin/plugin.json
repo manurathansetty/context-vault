@@ -1,6 +1,6 @@
 {
   "name": "context-vault",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Versioned Obsidian context for Codex projects.",
   "license": "MIT",
   "author": {

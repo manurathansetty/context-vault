@@ -292,6 +292,35 @@ def write_note(
     return _write_markdown(path, metadata, body, exclusive=exclusive)
 
 
+_FRONTMATTER_KEY = re.compile(r"^([^:\n]+):(?:[ \t]*(.*))?$")
+_LEGACY_LIST_ITEM = re.compile(r"^  -[ \t]+(.+)$")
+
+
+def _parse_frontmatter_scalar(raw_value: str, path: Path, line_number: int) -> Any:
+    """Parse current JSON values or the safe scalar subset of legacy YAML.
+
+    The original vault contract used YAML frontmatter, but the current writer
+    serializes every value as JSON.  Legacy support intentionally accepts only
+    YAML's plain and single-quoted scalar forms; complex YAML constructs remain
+    unsupported so reading a note never invokes a YAML loader.
+    """
+    try:
+        return json.loads(raw_value)
+    except json.JSONDecodeError:
+        value = raw_value.strip()
+        if value.startswith(("[", "{", '"', "!", "&", "*", "|", ">")):
+            raise ValueError(
+                f"{path} has unsupported or malformed frontmatter value on line {line_number}"
+            ) from None
+        if value.startswith("'"):
+            if len(value) < 2 or not value.endswith("'"):
+                raise ValueError(
+                    f"{path} has unterminated single-quoted frontmatter value on line {line_number}"
+                )
+            return value[1:-1].replace("''", "'")
+        return value
+
+
 def read_note(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
@@ -302,11 +331,31 @@ def read_note(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path} has unterminated frontmatter") from exc
 
     metadata: dict[str, Any] = {}
-    for line in frontmatter.splitlines():
-        key, separator, raw_value = line.partition(": ")
-        if not separator:
+    lines = frontmatter.splitlines()
+    line_index = 0
+    while line_index < len(lines):
+        line = lines[line_index]
+        match = _FRONTMATTER_KEY.match(line)
+        if not match:
             raise ValueError(f"{path} has invalid frontmatter line: {line}")
-        metadata[key] = json.loads(raw_value)
+        key, raw_value = match.groups()
+        line_number = line_index + 1
+        if raw_value:
+            metadata[key] = _parse_frontmatter_scalar(raw_value, path, line_number)
+            line_index += 1
+            continue
+
+        line_index += 1
+        items: list[Any] = []
+        while line_index < len(lines):
+            item_match = _LEGACY_LIST_ITEM.match(lines[line_index])
+            if not item_match:
+                break
+            items.append(
+                _parse_frontmatter_scalar(item_match.group(1), path, line_index + 1)
+            )
+            line_index += 1
+        metadata[key] = items if items else None
     if body.startswith("\n"):
         body = body[1:]
     return {"path": path, "metadata": metadata, "body": body}
@@ -1283,6 +1332,184 @@ def _note_summary(note: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+# --------------------------------------------------------------------------
+# Retrieval index and ranking (v0.6)
+# --------------------------------------------------------------------------
+
+_STOPWORDS = frozenset(
+    "a an the of to in on for and or is are was were be with by at from this that "
+    "it its as into we our you your i".split()
+)
+
+# Field → weight for focus ranking. Higher = more identifying.
+_FIELD_WEIGHTS = {
+    "subject": 5.0,
+    "title": 5.0,
+    "relation": 4.0,
+    "value": 3.0,
+    "choice": 3.0,
+    "rationale": 2.0,
+    "next_step": 2.0,
+    "completed": 2.0,
+    "evidence": 1.0,
+}
+
+_TYPE_WEIGHTS = {"decision": 2.0, "fact": 1.5, "session": 1.0}
+
+_INDEX_SCHEMA = 1
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase alphanumeric tokens; [[target|alias]] contributes target's
+    words plus the literal link target; stopwords dropped."""
+    normalized = re.sub(
+        r"\[\[([^\]|]+)(?:\|[^\]]*)?\]\]",
+        lambda m: " " + m.group(1) + " " + m.group(1).replace(" ", "_") + " ",
+        text,
+    )
+    tokens = re.split(r"[^a-z0-9_]+", normalized.lower())
+    return [tok for tok in tokens if tok and tok not in _STOPWORDS]
+
+
+def _record_terms(metadata: dict[str, Any]) -> dict[str, float]:
+    """Weighted term frequencies across a record's searchable fields."""
+    terms: dict[str, float] = {}
+    for field, weight in _FIELD_WEIGHTS.items():
+        raw = metadata.get(field)
+        if raw is None:
+            continue
+        values = raw if isinstance(raw, list) else [raw]
+        for value in values:
+            for token in _tokenize(str(value)):
+                terms[token] = terms.get(token, 0.0) + weight
+    return terms
+
+
+def _index_dir() -> Path:
+    directory = _config_dir() / "index"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    return directory
+
+
+def _vault_key(vault_path: Path) -> str:
+    return hashlib.sha256(str(vault_path.resolve()).encode()).hexdigest()[:16]
+
+
+def _record_files(notes_root: Path) -> list[Path]:
+    files: list[Path] = []
+    for folder in (*RECORD_FOLDERS, "projects", "people"):
+        directory = notes_root / folder
+        if directory.is_dir():
+            files.extend(sorted(directory.glob("*.md")))
+    return files
+
+
+def _vault_revision(vault_path: Path) -> str | None:
+    """Content-identity key. git: HEAD + tracked-record digest; non-git:
+    digest of (path, size, mtime_ns). Returns None when nothing can be
+    established (caller then falls back to a direct scan)."""
+    notes_root = vault_path / "codex-context"
+    files = _record_files(notes_root)
+    hasher = hashlib.sha256()
+    head = _run_git(vault_path, "rev-parse", "HEAD")
+    if head.returncode == 0 and head.stdout.strip():
+        hasher.update(head.stdout.strip().encode())
+    try:
+        for path in files:
+            stat = path.stat()
+            hasher.update(f"{path}:{stat.st_size}:{stat.st_ns if hasattr(stat, 'st_ns') else stat.st_mtime_ns}".encode())
+    except OSError:
+        return None
+    return hasher.hexdigest()[:32]
+
+
+def build_index(vault_path: Path) -> dict[str, Any]:
+    notes_root = vault_path / "codex-context"
+    entries: list[dict[str, Any]] = []
+    for path in _record_files(notes_root):
+        try:
+            note = read_note(path)
+        except (ValueError, json.JSONDecodeError):
+            continue
+        metadata = note["metadata"]
+        entries.append(
+            {
+                "id": path.stem,
+                "folder": path.parent.name,
+                "type": metadata.get("type"),
+                "project": metadata.get("project"),
+                "recorded_at": metadata.get("recorded_at"),
+                "terms": _record_terms(metadata),
+                "source": str(path),
+            }
+        )
+    return {
+        "schema": _INDEX_SCHEMA,
+        "revision": _vault_revision(vault_path),
+        "entries": entries,
+    }
+
+
+def load_or_build_index(vault_path: Path) -> dict[str, Any] | None:
+    """Return a fresh index, rebuilding atomically under the vault lock when
+    the revision key has moved. None when no revision can be established."""
+    revision = _vault_revision(vault_path)
+    if revision is None:
+        return None
+    index_path = _index_dir() / f"{_vault_key(vault_path)}.json"
+    if index_path.exists():
+        try:
+            cached = json.loads(index_path.read_text(encoding="utf-8"))
+            if cached.get("schema") == _INDEX_SCHEMA and cached.get("revision") == revision:
+                return cached
+        except (OSError, json.JSONDecodeError):
+            pass
+    with _vault_lock(vault_path):
+        index = build_index(vault_path)
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=index_path.parent, delete=False
+        ) as handle:
+            json.dump(index, handle)
+            temp = Path(handle.name)
+        os.chmod(temp, 0o600)
+        temp.replace(index_path)
+    return index
+
+
+def _recency_bonus(recorded_at: str | None, now: datetime) -> float:
+    if not recorded_at:
+        return 0.0
+    try:
+        age_days = (now - _parse_recorded_at(str(recorded_at))).total_seconds() / 86400
+    except (ValueError, TypeError):
+        return 0.0
+    # Bounded decay: ~2.0 fresh, ~0 after a season, never negative.
+    return max(0.0, 2.0 * (30.0 / (30.0 + max(0.0, age_days))))
+
+
+def rank_records(
+    summaries: list[dict[str, Any]], focus: str, index: dict[str, Any] | None, now: datetime
+) -> list[dict[str, Any]]:
+    """Score summaries against a focus query. Deterministic; stable tie-break
+    on recorded_at then id. Falls back to computing terms inline when no index."""
+    query_tokens = set(_tokenize(focus))
+    term_map = {entry["id"]: entry["terms"] for entry in (index or {}).get("entries", [])}
+    scored: list[tuple[float, str, str, dict[str, Any]]] = []
+    for summary in summaries:
+        rid = str(summary.get("id"))
+        terms = term_map.get(rid) or _record_terms(summary)
+        keyword = sum(terms.get(tok, 0.0) for tok in query_tokens)
+        score = (
+            keyword
+            + _recency_bonus(summary.get("recorded_at"), now)
+            + _TYPE_WEIGHTS.get(str(summary.get("type")), 1.0)
+        )
+        scored.append((score, str(summary.get("recorded_at") or ""), rid, summary))
+    scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    return [item[3] for item in scored]
+
+
 def _apply_withdrawal_rule(
     notes: list[dict[str, Any]],
     withdrawn: dict[str, str],
@@ -1404,12 +1631,29 @@ def repair_chores(notes_root: Path) -> list[dict[str, Any]]:
     return chores
 
 
+FOCUS_CAPS = {"current_facts": 15, "active_decisions": 8, "recent_sessions": 8}
+
+
+def _focus_section(
+    summaries: list[dict[str, Any]],
+    focus: str,
+    index: dict[str, Any] | None,
+    cap: int,
+    now: datetime,
+) -> tuple[list[dict[str, Any]], int]:
+    ranked = rank_records(summaries, focus, index, now)
+    kept = ranked[:cap]
+    return kept, max(0, len(ranked) - len(kept))
+
+
 def build_brief(
     notes_root: Path,
     workspace: Path,
     valid_at: date | None = None,
     known_at: datetime | None = None,
     project_note: dict[str, Any] | None = None,
+    focus: str | None = None,
+    vault_path: Path | None = None,
 ) -> dict[str, Any]:
     project_note = project_note or find_project(notes_root, workspace)
     project = project_note["metadata"]
@@ -1435,6 +1679,26 @@ def build_brief(
             notes_root, project["id"], historical=historical, known_at=known_at
         )
     ]
+    disputes = detect_disputes(facts)
+    omitted: dict[str, int] = {}
+    if focus:
+        # Rank and cap each section; safety classes (disputes here, plus the
+        # repair chores below) are never dropped by ranking.
+        now = datetime.now(timezone.utc)
+        index = load_or_build_index(vault_path) if vault_path is not None else None
+        disputed_ids = {str(f.get("id")) for d in disputes for f in d["facts"]}
+        ranked_facts, omitted["current_facts"] = _focus_section(
+            [f for f in facts if str(f.get("id")) not in disputed_ids],
+            focus, index, FOCUS_CAPS["current_facts"], now,
+        )
+        # Re-attach disputed facts (safety class) on top of the ranked set.
+        facts = [f for f in facts if str(f.get("id")) in disputed_ids] + ranked_facts
+        decisions, omitted["active_decisions"] = _focus_section(
+            decisions, focus, index, FOCUS_CAPS["active_decisions"], now
+        )
+        sessions, omitted["recent_sessions"] = _focus_section(
+            sessions, focus, index, FOCUS_CAPS["recent_sessions"], now
+        )
     by_repo: dict[str, dict[str, list[str]]] = {}
     for kind, items in (("facts", facts), ("decisions", decisions), ("sessions", sessions)):
         for item in items:
@@ -1443,7 +1707,7 @@ def build_brief(
                     str(repo), {"facts": [], "decisions": [], "sessions": []}
                 )
                 bucket[kind].append(str(item.get("id")))
-    return {
+    result = {
         "project": project,
         "goal": project["goal"],
         "open_questions": project.get("open_questions", []),
@@ -1451,7 +1715,7 @@ def build_brief(
         "active_decisions": decisions,
         "recent_sessions": sessions,
         "by_repo": by_repo,
-        "disputes": detect_disputes(facts),
+        "disputes": disputes,
         "repair_chores": repair_chores(notes_root),
         "sources": [
             str(project_note["path"]),
@@ -1459,6 +1723,41 @@ def build_brief(
             *(decision["source"] for decision in decisions),
             *(session["source"] for session in sessions),
         ],
+    }
+    if focus:
+        result["focus"] = focus
+        result["omitted"] = {k: v for k, v in omitted.items() if v}
+    return result
+
+
+def entity_query(
+    notes_root: Path, entity: str, consent: str | None = None
+) -> dict[str, Any]:
+    """Every record referencing an entity wiki-link, across all projects in
+    the vault, grouped by project. Normalizes [[target|alias]] to target."""
+    target = re.sub(r"^\[\[|\]\]$", "", entity.strip())
+    target = target.split("|", 1)[0].strip().lower()
+    if not target:
+        raise ValueError("entity must be a non-empty wiki-link target")
+    want_tokens = set(_tokenize(f"[[{target}]]"))
+    by_project: dict[str, list[dict[str, Any]]] = {}
+    matched = 0
+    for folder in RECORD_FOLDERS:
+        for note in _read_folder(notes_root, folder):
+            metadata = note["metadata"]
+            if consent is not None and (metadata.get("consent") == "auto") != (consent == "auto"):
+                continue
+            terms = _record_terms(metadata)
+            if want_tokens & set(terms):
+                matched += 1
+                by_project.setdefault(str(metadata.get("project")), []).append(
+                    _note_summary(note)
+                )
+    return {
+        "entity": f"[[{target}]]",
+        "matched": matched,
+        "by_project": by_project,
+        "unresolved": matched == 0,
     }
 
 
@@ -2247,6 +2546,7 @@ def main(argv: list[str] | None = None) -> int:
     brief_parser.add_argument("--valid-at")
     brief_parser.add_argument("--known-at")
     brief_parser.add_argument("--consent", choices=("auto", "manual"))
+    brief_parser.add_argument("--focus")
 
     proposal = subparsers.add_parser("propose-fact", help="create a fact proposal without writing")
     proposal.add_argument("--vault")
@@ -2355,7 +2655,10 @@ def main(argv: list[str] | None = None) -> int:
     query_parser.add_argument("--vault-name")
     query_parser.add_argument("--workspace")
     query_parser.add_argument("--project")
-    query_parser.add_argument("--mode", choices=("current", "historical", "provenance"), required=True)
+    query_parser.add_argument(
+        "--mode", choices=("current", "historical", "provenance", "entity"), required=True
+    )
+    query_parser.add_argument("--entity")
     query_parser.add_argument("--valid-at")
     query_parser.add_argument("--known-at")
     query_parser.add_argument("--decision")
@@ -2395,6 +2698,12 @@ def main(argv: list[str] | None = None) -> int:
         "resolve-mode", help="effective consent mode for the vault a workspace routes to"
     )
     resolve_mode_parser.add_argument("--workspace", required=True)
+
+    reindex_parser = subparsers.add_parser(
+        "reindex", help="force-rebuild the retrieval index for a vault"
+    )
+    reindex_parser.add_argument("--vault")
+    reindex_parser.add_argument("--vault-name")
 
     auto_parser = subparsers.add_parser("auto", help="manage auto mode (standing consent)")
     auto_parser.add_argument("action", choices=("enable", "disable", "status"))
@@ -2455,6 +2764,8 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError("historical queries require --valid-at")
                 if args.mode == "provenance" and not args.decision:
                     raise ValueError("provenance queries require --decision")
+                if args.mode == "entity" and not args.entity:
+                    raise ValueError("entity queries require --entity")
             if args.vault and args.vault_name:
                 raise ValueError("pass --vault or --vault-name, not both")
             if not args.workspace and not args.project:
@@ -2498,6 +2809,11 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     routed_entry = config["vaults"][vault_name]
                     notes_root = config["vaults"][vault_name]["path"] / "codex-context"
+            vault_path = notes_root.parent
+            if args.command == "query" and args.mode == "entity":
+                payload = entity_query(notes_root, args.entity, getattr(args, "consent", None))
+                _emit(payload)
+                return 0
             if args.command == "query" and args.mode == "provenance":
                 payload = decision_provenance(
                     notes_root,
@@ -2509,7 +2825,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 payload = build_brief(
-                    notes_root, workspace_path, valid_at, known_at, project_note
+                    notes_root,
+                    workspace_path,
+                    valid_at,
+                    known_at,
+                    project_note,
+                    focus=getattr(args, "focus", None),
+                    vault_path=vault_path,
                 )
             if sync_map:
                 payload["sync"] = sync_map
@@ -2766,6 +3088,30 @@ def main(argv: list[str] | None = None) -> int:
                         }
                         for name, entry in config["vaults"].items()
                     },
+                }
+            )
+            return 0
+        if args.command == "reindex":
+            if args.vault and args.vault_name:
+                raise ValueError("pass --vault or --vault-name, not both")
+            if args.vault:
+                vault_path = Path(args.vault).expanduser().resolve()
+            else:
+                config = load_config()
+                if args.vault_name:
+                    vault_path = _vault_by_name(config, args.vault_name)["path"]
+                elif len(config["vaults"]) == 1:
+                    vault_path = next(iter(config["vaults"].values()))["path"]
+                else:
+                    raise ValueError("multiple vaults configured; pass --vault or --vault-name")
+            index = build_index(vault_path)
+            # Persist through the normal path so the on-disk copy matches.
+            load_or_build_index(vault_path)
+            _emit(
+                {
+                    "vault": str(vault_path),
+                    "records": len(index["entries"]),
+                    "revision": index["revision"],
                 }
             )
             return 0

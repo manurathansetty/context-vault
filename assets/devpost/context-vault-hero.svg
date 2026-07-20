@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1536" height="1024" viewBox="0 0 1536 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Context Vault — durable memory for AI coding workflows</title>
+  <desc id="desc">A visual flow from code workspace, through Context Vault, to a shared Obsidian-friendly team vault.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#081526"/>
+      <stop offset="0.55" stop-color="#102b48"/>
+      <stop offset="1" stop-color="#1b2450"/>
+    </linearGradient>
+    <linearGradient id="vault" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#39d6c4"/>
+      <stop offset="1" stop-color="#4e8fff"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#020815" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="1536" height="1024" fill="url(#bg)"/>
+  <circle cx="210" cy="165" r="255" fill="#1c5e88" opacity="0.16"/>
+  <circle cx="1330" cy="820" r="330" fill="#5741ba" opacity="0.15"/>
+  <path d="M0 776 C310 640 495 932 790 792 S1230 610 1536 752" fill="none" stroke="#54d8c8" stroke-width="2" opacity="0.12"/>
+  <path d="M0 812 C310 676 495 968 790 828 S1230 646 1536 788" fill="none" stroke="#67a3ff" stroke-width="2" opacity="0.10"/>
+
+  <text x="768" y="132" fill="#f6fbff" font-family="Inter, SF Pro Display, Arial, sans-serif" font-size="68" font-weight="700" text-anchor="middle">Context Vault</text>
+  <text x="768" y="190" fill="#aec4d9" font-family="Inter, SF Pro Display, Arial, sans-serif" font-size="27" text-anchor="middle">Durable memory for AI coding workflows</text>
+
+  <g opacity="0.9">
+    <path d="M435 560 C525 560 568 560 630 560" fill="none" stroke="#53d4c5" stroke-width="4" stroke-linecap="round"/>
+    <path d="M905 560 C973 560 1024 560 1102 560" fill="none" stroke="#68a1ff" stroke-width="4" stroke-linecap="round"/>
+    <path d="M606 546 L630 560 L606 574" fill="none" stroke="#53d4c5" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M1078 546 L1102 560 L1078 574" fill="none" stroke="#68a1ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="134" y="384" width="300" height="352" rx="30" fill="#10253c" stroke="#2c5878" stroke-width="2"/>
+    <rect x="156" y="407" width="256" height="44" rx="14" fill="#183650"/>
+    <circle cx="181" cy="429" r="7" fill="#ff7a7a"/>
+    <circle cx="205" cy="429" r="7" fill="#ffd36a"/>
+    <circle cx="229" cy="429" r="7" fill="#58d8b7"/>
+    <rect x="164" y="482" width="64" height="10" rx="5" fill="#5acfc4"/>
+    <rect x="240" y="482" width="138" height="10" rx="5" fill="#57769a"/>
+    <rect x="164" y="516" width="180" height="10" rx="5" fill="#7a9ec6" opacity="0.75"/>
+    <rect x="164" y="550" width="102" height="10" rx="5" fill="#59789c"/>
+    <rect x="278" y="550" width="80" height="10" rx="5" fill="#877cf7"/>
+    <rect x="164" y="604" width="214" height="68" rx="16" fill="#0d1d31" stroke="#284866"/>
+    <path d="M184 638 L201 654 L226 620" fill="none" stroke="#53d4c5" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="284" y="698" fill="#dcecff" font-family="Inter, Arial, sans-serif" font-size="23" font-weight="600" text-anchor="middle">Code workspace</text>
+    <text x="284" y="727" fill="#8da9c1" font-family="Inter, Arial, sans-serif" font-size="17" text-anchor="middle">Codex session</text>
+  </g>
+
+  <g filter="url(#glow)">
+    <rect x="630" y="342" width="276" height="436" rx="42" fill="#102a46" stroke="url(#vault)" stroke-width="4"/>
+    <path d="M699 457 L768 414 L837 457 L837 550 L768 592 L699 550 Z" fill="url(#vault)" opacity="0.95"/>
+    <path d="M699 457 L768 499 L837 457 M768 499 L768 592" fill="none" stroke="#eafffb" stroke-width="4" opacity="0.78"/>
+    <rect x="686" y="642" width="164" height="11" rx="5.5" fill="#d9fffb" opacity="0.9"/>
+    <rect x="713" y="674" width="110" height="9" rx="4.5" fill="#94cfc9" opacity="0.75"/>
+    <text x="768" y="718" fill="#f5fffe" font-family="Inter, Arial, sans-serif" font-size="29" font-weight="700" text-anchor="middle">Context Vault</text>
+    <text x="768" y="748" fill="#a4d8d2" font-family="Inter, Arial, sans-serif" font-size="17" text-anchor="middle">Facts · decisions · handoffs</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="1102" y="384" width="300" height="352" rx="30" fill="#17254a" stroke="#405b9e" stroke-width="2"/>
+    <g stroke="#74a9ff" stroke-width="3" opacity="0.9">
+      <path d="M1182 506 L1252 470 L1324 520 L1262 588 L1182 506" fill="none"/>
+      <path d="M1252 470 L1285 437 L1353 465 L1324 520" fill="none"/>
+      <path d="M1262 588 L1340 630 L1366 561 L1324 520" fill="none"/>
+    </g>
+    <g fill="#66d7c6">
+      <circle cx="1182" cy="506" r="12"/><circle cx="1252" cy="470" r="12"/><circle cx="1324" cy="520" r="12"/>
+      <circle cx="1285" cy="437" r="12"/><circle cx="1353" cy="465" r="12"/><circle cx="1262" cy="588" r="12"/>
+      <circle cx="1340" cy="630" r="12"/><circle cx="1366" cy="561" r="12"/>
+    </g>
+    <text x="1252" y="698" fill="#e9efff" font-family="Inter, Arial, sans-serif" font-size="23" font-weight="600" text-anchor="middle">Team vault</text>
+    <text x="1252" y="727" fill="#a8b9e1" font-family="Inter, Arial, sans-serif" font-size="17" text-anchor="middle">Obsidian-friendly Markdown</text>
+  </g>
+
+  <g transform="translate(376 868)">
+    <rect width="784" height="64" rx="32" fill="#10263d" stroke="#2e536f"/>
+    <circle cx="39" cy="32" r="9" fill="#55d6c5"/>
+    <text x="64" y="39" fill="#cfe1ef" font-family="Inter, Arial, sans-serif" font-size="22">Evidence-backed context that survives sessions, tools, and teammates</text>
+  </g>
+</svg>
