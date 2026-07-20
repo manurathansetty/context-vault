@@ -158,6 +158,23 @@ config. Bootstrap a brand-new team vault by creating an empty private repo first
 | ⚔️ | **Conflicts are visible, never silent.** Records are append-only new files (structurally conflict-free); mutable notes auto-merge with a visible `merge_status` mark; diverged records are preserved byte-for-byte with one copy quarantined; contradictory facts surface as **disputes** in every brief (`--cardinality multi` opts out relations where many values are normal). |
 | 🛡️ | **CI backstop.** The vendored workflow validates schema and author stamps, flags stale marks, and reports any edit of a historical record as an append-only violation. |
 
+### 🟣 Obsidian Sync variant (this branch)
+
+Already paying for **Obsidian Sync**? This branch adds `sync: "obsidian"`
+team vaults — same schema, attribution, disputes, topics, and auto mode, with
+file transport handled entirely by Obsidian Sync instead of git:
+
+```bash
+# create/join the shared vault in the Obsidian Sync UI first, then:
+python3 "$CV" init-obsidian-team --path "/path/to/local/synced/vault" --identity yourname
+```
+
+Honest trade-offs vs. git vaults: sync freshness is invisible to the CLI
+(briefs say `freshness: unknown`), mutable-note conflicts are merged by
+Obsidian Sync itself, there's no git history or CI, and `withdraw` is the
+only correction (`retract` needs git). Full comparison in
+[`docs/superpowers/specs/2026-07-20-obsidian-sync-team-vaults-design.md`](docs/superpowers/specs/2026-07-20-obsidian-sync-team-vaults-design.md).
+
 ## 🧵 Topics across repos
 
 Projects are topics ("Payments revamp"), and one topic may span several code
