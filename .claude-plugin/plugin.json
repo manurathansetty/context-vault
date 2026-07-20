@@ -1,6 +1,6 @@
 {
   "name": "context-vault",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Durable, reviewable project context stored as Markdown in a local Obsidian vault. Resume work, preserve decisions, and answer why a choice was made.",
   "author": {
     "name": "manurathansetty"

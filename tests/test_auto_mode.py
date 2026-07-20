@@ -248,7 +248,8 @@ class AutoModeTests(AutoModeBase):
             historical=True,
         )
         self.assertEqual(len(historical), 1)
-        self.assertIn("withdrawn_at", historical[0]["metadata"])
+        # Pinned before the withdrawal: it wasn't known yet, so no annotation.
+        self.assertNotIn("withdrawn_at", historical[0]["metadata"])
         historical_brief = context_vault.build_brief(
             vault / "codex-context", workspace,
             valid_at=context_vault.date.fromisoformat("2026-07-19"),
@@ -600,6 +601,118 @@ class ProductionHardeningTests(AutoModeBase):
         )
         self.assertEqual(filtered["disputes"], [])
         self.assertEqual(len(filtered["sources"]), 2)  # project note + the one auto fact
+
+    def test_retract_refuses_dirty_index_then_succeeds_clean(self) -> None:
+        origin, clone_a, clone_b = self.make_team_setup()
+        record = context_vault.record_fact(
+            clone_a, "shared-app", "[[Oops]]", "is", "wrong", "2026-07-20", ["e"], True
+        )
+        self.assertTrue(context_vault.sync_push(clone_a, [record], "record fact")["pushed"])
+        unrelated = clone_a / "unrelated.md"
+        unrelated.write_text("developer work\n", encoding="utf-8")
+        self._git(clone_a, "add", "unrelated.md")
+        with self.assertRaises(context_vault.ContextVaultError):
+            context_vault.retract_record(clone_a, record.stem, True)
+        self.assertTrue(record.exists())  # nothing happened
+        self._git(clone_a, "reset", "unrelated.md")
+        result = context_vault.retract_record(clone_a, record.stem, True)
+        self.assertTrue(result["pushed"], result)
+        committed = self._git(
+            clone_a, "show", "--name-only", "--format=", "HEAD"
+        ).stdout.split()
+        self.assertEqual(committed, [str(record.relative_to(clone_a))])
+
+    def test_concurrent_auto_writers_produce_single_record(self) -> None:
+        import subprocess as sp
+
+        self.cli_setup_auto_personal()
+        base = [
+            sys.executable, str(PLUGIN_ROOT / "scripts" / "context_vault.py"),
+            "record-fact", "--project", "auto-topic", "--subject", "[[Race]]",
+            "--relation", "is", "--value", "on", "--valid-from", "2026-07-20",
+            "--evidence", "e", "--trigger", "git-commit",
+            "--source-commit", "cafebabe1", "--session-id", "sess-race",
+        ]
+        first = sp.Popen(base, env=self.cli_env, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
+        second = sp.Popen(base, env=self.cli_env, stdout=sp.PIPE, stderr=sp.PIPE, text=True)
+        out_a, err_a = first.communicate(timeout=60)
+        out_b, err_b = second.communicate(timeout=60)
+        self.assertEqual(first.returncode, 0, err_a)
+        self.assertEqual(second.returncode, 0, err_b)
+        facts = list((self.root / "vault" / "codex-context" / "facts").glob("*.md"))
+        self.assertEqual(len(facts), 1, [out_a, out_b])
+        skipped = [
+            out for out in (out_a, out_b) if json.loads(out).get("skipped") == "duplicate"
+        ]
+        self.assertEqual(len(skipped), 1)
+
+    def test_known_at_applies_to_decisions_and_sessions(self) -> None:
+        vault = self.root / "vault-bt"
+        workspace = self.root / "ws-bt"
+        workspace.mkdir()
+        context_vault.record_project(vault, "BT", [str(workspace)], "Bitemporal", [], True)
+        context_vault.record_decision(
+            vault, "bt", "Early call", "A", [], "reason", ["e"], confirm=True,
+            recorded_at="2026-07-10T00:00:00+00:00",
+        )
+        context_vault.record_decision(
+            vault, "bt", "Late call", "B", [], "reason", ["e"], confirm=True,
+            recorded_at="2026-07-19T00:00:00+00:00",
+        )
+        context_vault.record_session(
+            vault, "bt", ["late work"], [], "next", ["e"], confirm=True,
+            recorded_at="2026-07-19T00:00:00+00:00",
+        )
+        pinned = context_vault.build_brief(
+            vault / "codex-context", workspace,
+            known_at=context_vault._parse_recorded_at("2026-07-15T00:00:00+00:00"),
+        )
+        self.assertEqual(len(pinned["active_decisions"]), 1)
+        self.assertEqual(pinned["active_decisions"][0]["title"], "Early call")
+        self.assertEqual(pinned["recent_sessions"], [])
+
+    def test_withdrawal_not_leaked_before_its_known_time(self) -> None:
+        vault = self.root / "vault-wl"
+        workspace = self.root / "ws-wl"
+        workspace.mkdir()
+        context_vault.record_project(vault, "WL", [str(workspace)], "Leak test", [], True)
+        record = context_vault.record_fact(
+            vault, "wl", "[[S]]", "is", "v", "2026-07-01", ["e"], True,
+            recorded_at="2026-07-01T00:00:00+00:00",
+        )
+        context_vault.withdraw_record(vault, record.stem, "later mistake", True)
+        pinned = context_vault.resolve_facts(
+            vault / "codex-context",
+            context_vault.date.fromisoformat("2026-07-02"),
+            context_vault._parse_recorded_at("2026-07-02T00:00:00+00:00"),
+            historical=True,
+        )
+        self.assertEqual(len(pinned), 1)
+        # The withdrawal happened after the pinned knowledge time: as-of that
+        # moment nobody knew it — the marker must not leak future state.
+        self.assertNotIn("withdrawn_at", pinned[0]["metadata"])
+
+    def test_provenance_consent_filter_covers_decision(self) -> None:
+        self.cli_setup_auto_personal()
+        manual_env = dict(self.cli_env, CONTEXT_VAULT_MANUAL="1")
+        recorded = self.run_cli(
+            "record-decision", "--project", "auto-topic", "--title", "Manual Call",
+            "--choice", "X", "--rationale", "r", "--evidence", "e", "--confirm",
+            env=manual_env,
+        )
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        mismatch = self.run_cli(
+            "query", "--project", "auto-topic", "--mode", "provenance",
+            "--decision", "Manual Call", "--consent", "auto",
+        )
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn("excluded by the --consent filter", mismatch.stderr)
+        match = self.run_cli(
+            "query", "--project", "auto-topic", "--mode", "provenance",
+            "--decision", "Manual Call", "--consent", "manual",
+        )
+        self.assertEqual(match.returncode, 0, match.stderr)
+        self.assertEqual(json.loads(match.stdout)["decision"]["title"], "Manual Call")
 
     def test_sync_read_reports_blocked_dirty_state(self) -> None:
         origin, clone_a, clone_b = self.make_team_setup()

@@ -671,6 +671,19 @@ def _idempotency_key(session_id: str, trigger: str, source: str | None) -> str:
     return hashlib.sha256(f"{session_id}:{trigger}:{source or ''}".encode()).hexdigest()[:16]
 
 
+def _acquire_session_lock(session_id: str):
+    """Exclusive per-session lock spanning duplicate-check → intent → write.
+
+    The handle is held for the remainder of the CLI process (one command per
+    process) and released by the OS at exit, so two concurrent auto writers
+    serialize: the second blocks here, then sees the first's write and skips.
+    """
+    path = _ledger_dir() / f"{_safe_session_id(session_id)}.lock"
+    handle = open(path, "w", encoding="utf-8")
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    return handle
+
+
 DEDUPED_TRIGGERS = ("git-commit", "precompact", "wrapup")
 
 TRIGGERS = ("milestone", "decision", "git-commit", "precompact", "wrapup")
@@ -803,11 +816,24 @@ def retract_record(
             "(history and already-pulled clones retain the content either way)"
         )
     with _vault_lock(vault_path):
+        # Clean-index guard: the commit after revert is a whole-index commit,
+        # so a developer's staged files must never be present.
+        staged = _run_git(vault_path, "diff", "--cached", "--name-only").stdout.strip()
+        if staged:
+            raise ContextVaultError(
+                "the vault index has staged changes "
+                f"({staged.splitlines()[0]}...); commit or unstage them before retracting"
+            )
         revert = _run_git(vault_path, "revert", "--no-commit", sha)
         if revert.returncode != 0:
             _run_git(vault_path, "revert", "--abort")
             raise ContextVaultError(f"revert failed: {revert.stderr.strip()[:200]}")
-        _run_git(vault_path, "commit", "-m", f"retract: remove {stem} from current tree")
+        committed = _run_git(
+            vault_path, "commit", "-m", f"retract: remove {stem} from current tree"
+        )
+        if committed.returncode != 0:
+            _run_git(vault_path, "revert", "--abort")
+            raise ContextVaultError(f"retract commit failed: {committed.stderr.strip()[:200]}")
         pushed = False
         for _ in range(3):
             if _run_git(vault_path, "push", timeout=GIT_TIMEOUT_SECONDS).returncode == 0:
@@ -885,6 +911,9 @@ def _auto_write_context(
     if source_commit is not None and not _COMMIT_SHA_RE.match(source_commit):
         raise ValueError("source commit must be a 7-40 char hex sha")
     key = _idempotency_key(session_id, trigger, source_commit)
+    # Serialize check→reserve→write across processes; kept in the context so
+    # the lock lives until this CLI invocation exits.
+    context["_session_lock"] = _acquire_session_lock(session_id)
     duplicate = False
     if trigger in DEDUPED_TRIGGERS:
         duplicate = any(
@@ -1244,13 +1273,21 @@ def _note_summary(note: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_withdrawal_rule(
-    notes: list[dict[str, Any]], withdrawn: dict[str, str], historical: bool
+    notes: list[dict[str, Any]],
+    withdrawn: dict[str, str],
+    historical: bool,
+    known_at: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """One temporal rule for every record type: current state hides withdrawn
-    records; historical views return them annotated with `withdrawn_at`."""
+    records; historical views return them annotated with `withdrawn_at`.
+    A withdrawal recorded after `known_at` is future knowledge and must not
+    leak into an as-of query — the record appears exactly as it was known."""
     kept = []
     for note in notes:
         withdrawal_time = withdrawn.get(note["path"].stem)
+        if withdrawal_time is not None and known_at is not None:
+            if _parse_recorded_at(withdrawal_time) > known_at:
+                withdrawal_time = None  # not yet known at the pinned time
         if withdrawal_time is None:
             kept.append(note)
         elif historical:
@@ -1259,8 +1296,21 @@ def _apply_withdrawal_rule(
     return kept
 
 
+def _known_by(notes: list[dict[str, Any]], known_at: datetime | None) -> list[dict[str, Any]]:
+    if known_at is None:
+        return notes
+    return [
+        note
+        for note in notes
+        if _parse_recorded_at(str(note["metadata"].get("recorded_at", ""))) <= known_at
+    ]
+
+
 def _active_decisions(
-    notes_root: Path, project_id: str, historical: bool = False
+    notes_root: Path,
+    project_id: str,
+    historical: bool = False,
+    known_at: datetime | None = None,
 ) -> list[dict[str, Any]]:
     withdrawn = _withdrawals(notes_root)
     decisions = [
@@ -1270,7 +1320,8 @@ def _active_decisions(
         and note["metadata"].get("project") == project_id
         and note["metadata"].get("status") == "active"
     ]
-    decisions = _apply_withdrawal_rule(decisions, withdrawn, historical)
+    decisions = _known_by(decisions, known_at)
+    decisions = _apply_withdrawal_rule(decisions, withdrawn, historical, known_at)
     superseded_ids = {
         str(note["metadata"]["supersedes"])
         for note in decisions
@@ -1284,7 +1335,10 @@ def _active_decisions(
 
 
 def _recent_sessions(
-    notes_root: Path, project_id: str, historical: bool = False
+    notes_root: Path,
+    project_id: str,
+    historical: bool = False,
+    known_at: datetime | None = None,
 ) -> list[dict[str, Any]]:
     withdrawn = _withdrawals(notes_root)
     sessions = [
@@ -1293,7 +1347,8 @@ def _recent_sessions(
         if note["metadata"].get("type") == "session"
         and note["metadata"].get("project") == project_id
     ]
-    sessions = _apply_withdrawal_rule(sessions, withdrawn, historical)
+    sessions = _known_by(sessions, known_at)
+    sessions = _apply_withdrawal_rule(sessions, withdrawn, historical, known_at)
     # Checkpoint chains: a superseded checkpoint is hidden by its successor,
     # so one working session collapses to one visible record.
     superseded_ids = {
@@ -1359,11 +1414,15 @@ def build_brief(
     ]
     decisions = [
         _note_summary(note)
-        for note in _active_decisions(notes_root, project["id"], historical=historical)
+        for note in _active_decisions(
+            notes_root, project["id"], historical=historical, known_at=known_at
+        )
     ]
     sessions = [
         _note_summary(note)
-        for note in _recent_sessions(notes_root, project["id"], historical=historical)
+        for note in _recent_sessions(
+            notes_root, project["id"], historical=historical, known_at=known_at
+        )
     ]
     by_repo: dict[str, dict[str, list[str]]] = {}
     for kind, items in (("facts", facts), ("decisions", decisions), ("sessions", sessions)):
@@ -1560,7 +1619,7 @@ def resolve_facts(
         for note in _read_folder(notes_root, "facts")
         if note["metadata"].get("type") == "fact"
     ]
-    pool = _apply_withdrawal_rule(pool, withdrawn, historical)
+    pool = _apply_withdrawal_rule(pool, withdrawn, historical, known_at)
     candidates = []
     for note in pool:
         metadata = note["metadata"]
@@ -2305,6 +2364,13 @@ def main(argv: list[str] | None = None) -> int:
                 payload["vault_mode"] = vault_mode(routed_config, routed_entry)
             if getattr(args, "consent", None):
                 want_auto = args.consent == "auto"
+                if "decision" in payload:
+                    # Provenance answers hinge on one decision; a consent filter
+                    # that excludes it must refuse, not silently return it.
+                    if (payload["decision"].get("consent") == "auto") != want_auto:
+                        raise ValueError(
+                            "the requested decision is excluded by the --consent filter"
+                        )
                 for section in ("current_facts", "active_decisions", "recent_sessions"):
                     if section in payload:
                         payload[section] = [
