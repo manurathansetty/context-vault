@@ -15,7 +15,7 @@ sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
 import context_vault
 
 
-class AutoModeTests(unittest.TestCase):
+class AutoModeBase(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
@@ -84,6 +84,19 @@ class AutoModeTests(unittest.TestCase):
         self.assertEqual(self.run_cli("auto", "enable").returncode, 0)
         return vault
 
+    def run_hook(self, script: str, payload: dict) -> CompletedProcess[str]:
+        return run(
+            [sys.executable, str(PLUGIN_ROOT / "scripts" / "hooks" / script)],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            check=False,
+            env=self.cli_env,
+        )
+
+
+
+class AutoModeTests(AutoModeBase):
     # ----------------------------------------------------------- mode config
 
     def test_vault_mode_resolution_and_downgrade_only_env(self) -> None:
@@ -171,7 +184,7 @@ class AutoModeTests(unittest.TestCase):
         base = [
             "record-fact", "--project", "auto-topic", "--subject", "[[A]]",
             "--relation", "is", "--value", "1", "--valid-from", "2026-07-20",
-            "--evidence", "e", "--trigger", "git-commit", "--source-commit", "abc123",
+            "--evidence", "e", "--trigger", "git-commit", "--source-commit", "abc1234def",
             "--session-id", "sess-dup",
         ]
         first = self.run_cli(*base)
@@ -232,8 +245,17 @@ class AutoModeTests(unittest.TestCase):
             vault / "codex-context",
             context_vault.date.fromisoformat("2026-07-19"),
             context_vault._parse_recorded_at("2026-07-19T00:00:01+00:00"),
+            historical=True,
         )
         self.assertEqual(len(historical), 1)
+        self.assertIn("withdrawn_at", historical[0]["metadata"])
+        historical_brief = context_vault.build_brief(
+            vault / "codex-context", workspace,
+            valid_at=context_vault.date.fromisoformat("2026-07-19"),
+        )
+        self.assertEqual(len(historical_brief["current_facts"]), 1)
+        self.assertIn("withdrawn_at", historical_brief["current_facts"][0])
+        self.assertEqual(historical_brief["disputes"], [])
 
     def test_withdraw_removes_dispute(self) -> None:
         vault = self.root / "vault4"
@@ -375,16 +397,6 @@ class AutoModeTests(unittest.TestCase):
 
     # ------------------------------------------------------------------ hooks
 
-    def run_hook(self, script: str, payload: dict) -> CompletedProcess[str]:
-        return run(
-            [sys.executable, str(PLUGIN_ROOT / "scripts" / "hooks" / script)],
-            input=json.dumps(payload),
-            capture_output=True,
-            text=True,
-            check=False,
-            env=self.cli_env,
-        )
-
     def test_post_tool_use_nudges_on_code_commit_only_in_auto(self) -> None:
         self.cli_setup_auto_personal()
         code_repo = self.root / "code"
@@ -394,6 +406,11 @@ class AutoModeTests(unittest.TestCase):
         (code_repo / "f.txt").write_text("x", encoding="utf-8")
         self._git(code_repo, "add", "-A")
         self._git(code_repo, "commit", "-m", "feat: x")
+        # Mode is per routed workspace: the code repo must route to the auto vault.
+        self.run_cli(
+            "project", "--name", "Auto Topic", "--workspace", str(self.root / "ws"),
+            "--workspace", str(code_repo), "--goal", "Test auto", "--confirm",
+        )
         payload = {
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
@@ -406,17 +423,25 @@ class AutoModeTests(unittest.TestCase):
         context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("--trigger git-commit", context)
         self.assertIn("--source-commit", context)
+        echoed = dict(payload, tool_input={"command": "echo git commit"})
+        self.assertEqual(self.run_hook("post_tool_use.py", echoed).stdout.strip(), "")
         self.run_cli("auto", "disable")
         silent = self.run_hook("post_tool_use.py", payload)
         self.assertEqual(silent.stdout.strip(), "")
 
     def test_pre_compact_instructs_checkpoint_when_auto(self) -> None:
         self.cli_setup_auto_personal()
-        result = self.run_hook("pre_compact.py", {"hook_event_name": "PreCompact"})
+        payload = {"hook_event_name": "PreCompact", "cwd": str(self.root / "ws")}
+        result = self.run_hook("pre_compact.py", payload)
         context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("precompact", context)
+        # No routable cwd → silent, even with auto enabled somewhere.
+        self.assertEqual(
+            self.run_hook("pre_compact.py", {"hook_event_name": "PreCompact"}).stdout.strip(),
+            "",
+        )
         self.run_cli("auto", "disable")
-        self.assertEqual(self.run_hook("pre_compact.py", {}).stdout.strip(), "")
+        self.assertEqual(self.run_hook("pre_compact.py", payload).stdout.strip(), "")
 
     def test_session_end_skips_marker_when_wrapup_recorded(self) -> None:
         ledger_dir = self.root / "xdg" / "context-vault" / "ledger"
@@ -441,6 +466,149 @@ class AutoModeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         markers = self.root / "xdg" / "context-vault" / "pending-markers"
         self.assertEqual(list(markers.glob("*.json")) if markers.exists() else [], [])
+
+
+class ProductionHardeningTests(AutoModeBase):
+    def test_sync_push_never_commits_unrelated_staged_files(self) -> None:
+        origin, clone_a, clone_b = self.make_team_setup()
+        unrelated = clone_a / "unrelated.md"
+        unrelated.write_text("developer work in progress\n", encoding="utf-8")
+        self._git(clone_a, "add", "unrelated.md")
+        record = context_vault.record_fact(
+            clone_a, "shared-app", "[[S]]", "is", "v", "2026-07-20", ["e"], True
+        )
+        info = context_vault.sync_push(clone_a, [record], "record fact: s")
+        self.assertTrue(info["pushed"], info)
+        committed = self._git(
+            clone_a, "show", "--name-only", "--format=", "HEAD"
+        ).stdout.split()
+        self.assertEqual(committed, [str(record.relative_to(clone_a))])
+        still_staged = self._git(clone_a, "diff", "--cached", "--name-only").stdout.split()
+        self.assertIn("unrelated.md", still_staged)
+
+    def test_validator_flags_withdrawal_deletion(self) -> None:
+        origin, clone_a, clone_b = self.make_team_setup()
+        record = context_vault.record_fact(
+            clone_a, "shared-app", "[[S]]", "is", "v", "2026-07-20", ["e"], True
+        )
+        context_vault.sync_push(clone_a, [record], "record fact")
+        tombstone = context_vault.withdraw_record(clone_a, record.stem, "wrong", True)
+        context_vault.sync_push(clone_a, [tombstone], "withdraw")
+        tombstone.unlink()
+        self._git(clone_a, "add", "-A")
+        self._git(clone_a, "commit", "-m", "sneakily delete withdrawal")
+        result = run(
+            [
+                sys.executable, str(PLUGIN_ROOT / "scripts" / "validate_vault.py"),
+                "--root", str(clone_a), "--append-only-range", "HEAD~1..HEAD",
+            ],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("append-only", result.stdout)
+
+    def test_withdraw_rejects_secret_reason(self) -> None:
+        vault = self.root / "vault9"
+        record = context_vault.record_fact(
+            vault, "p", "[[S]]", "is", "v", "2026-07-20", ["e"], True
+        )
+        with self.assertRaises(context_vault.SensitiveContentError):
+            context_vault.withdraw_record(
+                vault, record.stem, "leaked sk-abcdefghijklmnopqrstu123456", True
+            )
+
+    def test_auto_metadata_validation(self) -> None:
+        self.cli_setup_auto_personal()
+        bad_session = self.run_cli(
+            "record-fact", "--project", "auto-topic", "--subject", "[[S]]",
+            "--relation", "is", "--value", "v", "--valid-from", "2026-07-20",
+            "--evidence", "e", "--session-id", "bad session!",
+        )
+        self.assertNotEqual(bad_session.returncode, 0)
+        bad_sha = self.run_cli(
+            "record-fact", "--project", "auto-topic", "--subject", "[[S]]",
+            "--relation", "is", "--value", "v", "--valid-from", "2026-07-20",
+            "--evidence", "e", "--trigger", "git-commit", "--source-commit", "not-a-sha",
+        )
+        self.assertNotEqual(bad_sha.returncode, 0)
+
+    def test_canonical_dedup_survives_missing_ledger(self) -> None:
+        self.cli_setup_auto_personal()
+        base = [
+            "record-fact", "--project", "auto-topic", "--subject", "[[A]]",
+            "--relation", "is", "--value", "1", "--valid-from", "2026-07-20",
+            "--evidence", "e", "--trigger", "git-commit",
+            "--source-commit", "beadfeed1", "--session-id", "sess-crash",
+        ]
+        first = self.run_cli(*base)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        # Simulate the crash window: record exists but the ledger vanished.
+        ledger = self.root / "xdg" / "context-vault" / "ledger" / "sess-crash.jsonl"
+        ledger.unlink()
+        second = self.run_cli(*base)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(json.loads(second.stdout).get("skipped"), "duplicate")
+
+    def test_worktree_vault_operations_do_not_crash(self) -> None:
+        origin, clone_a, clone_b = self.make_team_setup()
+        worktree = self.root / "vault-worktree"
+        added = self._git(clone_a, "worktree", "add", "--detach", str(worktree))
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.assertTrue((worktree / ".git").is_file())  # linked worktree: .git is a FILE
+        info = context_vault.sync_read(worktree)
+        self.assertIn("state", info)
+        with context_vault._vault_lock(worktree):
+            pass  # lock path resolved via git plumbing, not a raw .git/ dir
+
+    def test_init_team_records_branch_and_doctor_verifies(self) -> None:
+        origin, clone_a, clone_b = self.make_team_setup()
+        context_vault.configure(
+            self.root / "vault", config_home=self.config_home, identity="alex"
+        )
+        target = self.root / "team-context"
+        run(["git", "clone", str(origin), str(target)], capture_output=True, check=True)
+        self._configure_git_user(target)
+        result = context_vault.init_team(
+            str(origin), name="team", path=target, config_home=self.config_home
+        )
+        self.assertEqual(result["branch"], "main")
+        config = context_vault.load_config(config_home=self.config_home)
+        self.assertEqual(config["vaults"]["team"]["branch"], "main")
+        report = context_vault.doctor(config_home=self.config_home)
+        checks = {c["check"]: c for c in report["checks"]}
+        self.assertTrue(checks["team: on configured branch"]["ok"])
+
+    def test_consent_filter_rebuilds_derived_views(self) -> None:
+        self.cli_setup_auto_personal()
+        auto_fact = self.run_cli(
+            "record-fact", "--project", "auto-topic", "--subject", "[[Owner]]",
+            "--relation", "owner", "--value", "[[A-team]]", "--valid-from", "2026-07-20",
+            "--evidence", "e",
+        )
+        self.assertEqual(auto_fact.returncode, 0, auto_fact.stderr)
+        manual_env = dict(self.cli_env, CONTEXT_VAULT_MANUAL="1")
+        manual_fact = self.run_cli(
+            "record-fact", "--project", "auto-topic", "--subject", "[[Owner]]",
+            "--relation", "owner", "--value", "[[B-team]]", "--valid-from", "2026-07-20",
+            "--evidence", "e", "--confirm", env=manual_env,
+        )
+        self.assertEqual(manual_fact.returncode, 0, manual_fact.stderr)
+        unfiltered = json.loads(self.run_cli("brief", "--project", "auto-topic").stdout)
+        self.assertEqual(len(unfiltered["disputes"]), 1)
+        filtered = json.loads(
+            self.run_cli("brief", "--project", "auto-topic", "--consent", "auto").stdout
+        )
+        self.assertEqual(filtered["disputes"], [])
+        self.assertEqual(len(filtered["sources"]), 2)  # project note + the one auto fact
+
+    def test_sync_read_reports_blocked_dirty_state(self) -> None:
+        origin, clone_a, clone_b = self.make_team_setup()
+        (clone_b / "codex-context" / "projects" / "shared-app.md").write_text(
+            "locally dirtied", encoding="utf-8"
+        )
+        info = context_vault.sync_read(clone_b)
+        self.assertTrue(info["online"])
+        self.assertEqual(info["state"], "blocked-dirty")
 
 
 if __name__ == "__main__":

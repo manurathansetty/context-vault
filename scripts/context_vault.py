@@ -125,9 +125,13 @@ def _parse_config(payload: dict[str, Any]) -> dict[str, Any]:
             mode = entry.get("mode")
             if mode is not None and mode not in VALID_MODES:
                 raise ContextVaultError(f"vault {name!r} has an invalid mode {mode!r}")
+            branch = entry.get("branch")
+            if branch is not None and (not isinstance(branch, str) or not branch.strip()):
+                raise ContextVaultError(f"vault {name!r} has an invalid branch")
             vaults[name] = {
                 "path": Path(path).expanduser().resolve(),
                 "sync": entry.get("sync"),
+                "branch": branch,
                 "mode": mode,
                 "mode_set_at": entry.get("mode_set_at"),
             }
@@ -195,6 +199,7 @@ def save_config(config: dict[str, Any], config_home: Path | None = None) -> Path
             name: {
                 "path": str(entry["path"]),
                 **({"sync": entry["sync"]} if entry.get("sync") else {}),
+                **({"branch": entry["branch"]} if entry.get("branch") else {}),
                 **({"mode": entry["mode"]} if entry.get("mode") else {}),
                 **({"mode_set_at": entry["mode_set_at"]} if entry.get("mode_set_at") else {}),
             }
@@ -618,10 +623,23 @@ def set_vault_mode(
     }
 
 
+LEDGER_MAX_AGE_DAYS = 30
+
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+
+
 def _ledger_dir() -> Path:
     directory = _config_dir() / "ledger"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
+    cutoff = time.time() - LEDGER_MAX_AGE_DAYS * 86400
+    for stale in directory.glob("*.jsonl"):
+        try:
+            if stale.stat().st_mtime < cutoff:
+                stale.unlink()
+        except OSError:
+            continue
     return directory
 
 
@@ -681,7 +699,17 @@ def auto_status(config: dict[str, Any]) -> dict[str, Any]:
                 if e.get("event") == "write" and e.get("push_state") == "pending-sync"
             ),
         }
-    return {"vaults": vaults, "latest_session": latest}
+    failures_log = _config_dir() / "hook-failures.log"
+    last_hook_failure = None
+    if failures_log.exists():
+        lines = failures_log.read_text(encoding="utf-8").splitlines()
+        if lines:
+            last_hook_failure = lines[-1]
+    return {
+        "vaults": vaults,
+        "latest_session": latest,
+        "last_hook_failure": last_hook_failure,
+    }
 
 
 def _withdrawals(notes_root: Path) -> dict[str, str]:
@@ -705,16 +733,17 @@ def withdraw_record(
     consent: str | None = None,
 ) -> Path:
     _require_confirmation(confirm)
+    _assert_safe_strings([reason])
     stem = Path(record).stem
     notes_root = vault / "codex-context"
     target = None
-    for folder in RECORD_FOLDERS:
+    for folder in CORRECTABLE_FOLDERS:
         candidate = notes_root / folder / f"{stem}.md"
         if candidate.exists():
             target = candidate
             break
     if target is None:
-        raise ContextVaultError(f"no record {stem!r} found in {vault}")
+        raise ContextVaultError(f"no correctable record {stem!r} found in {vault}")
     if stem in _withdrawals(notes_root):
         raise ContextVaultError(f"record {stem!r} is already withdrawn")
     timestamp = _timestamp()
@@ -744,13 +773,13 @@ def retract_record(
     notes_root = vault_path / "codex-context"
     stem = Path(record).stem
     target = None
-    for folder in RECORD_FOLDERS:
+    for folder in CORRECTABLE_FOLDERS:
         candidate = notes_root / folder / f"{stem}.md"
         if candidate.exists():
             target = candidate
             break
     if target is None:
-        raise ContextVaultError(f"no record {stem!r} found in {vault_path}")
+        raise ContextVaultError(f"no correctable record {stem!r} found in {vault_path}")
     relative = target.relative_to(vault_path)
     adds = _run_git(
         vault_path, "log", "--diff-filter=A", "--format=%H", "--", str(relative)
@@ -850,12 +879,24 @@ def _auto_write_context(
     if trigger not in TRIGGERS:
         raise ValueError(f"trigger must be one of: {', '.join(TRIGGERS)}")
     session_id = getattr(args, "session_id", None) or f"auto-{int(time.time())}-{_record_suffix()}"
+    if not _SESSION_ID_RE.match(session_id):
+        raise ValueError("session id must be 1-80 chars of [A-Za-z0-9_-]")
     source_commit = getattr(args, "source_commit", None)
+    if source_commit is not None and not _COMMIT_SHA_RE.match(source_commit):
+        raise ValueError("source commit must be a 7-40 char hex sha")
     key = _idempotency_key(session_id, trigger, source_commit)
-    if trigger in DEDUPED_TRIGGERS and any(
-        item.get("idempotency_key") == key and item.get("event") == "write"
-        for item in ledger_entries(session_id)
-    ):
+    duplicate = False
+    if trigger in DEDUPED_TRIGGERS:
+        duplicate = any(
+            item.get("idempotency_key") == key and item.get("event") == "write"
+            for item in ledger_entries(session_id)
+        ) or (
+            # Canonical-data check closes the crash window between record write
+            # and ledger update: the record itself carries its stamps.
+            _existing_auto_record(entry["path"], session_id, trigger, source_commit)
+            is not None
+        )
+    if duplicate:
         ledger_append(
             session_id, {"event": "skip", "idempotency_key": key, "trigger": trigger}
         )
@@ -866,6 +907,17 @@ def _auto_write_context(
             "session_id": session_id,
         }
         return context
+    # Reserve intent before any write so a crash mid-flow is visible on retry.
+    ledger_append(
+        session_id,
+        {
+            "event": "intent",
+            "trigger": trigger,
+            "idempotency_key": key,
+            "source_commit": source_commit,
+            "at": _timestamp(),
+        },
+    )
     supersedes = getattr(args, "supersedes", None)
     if record_kind == "session" and supersedes:
         writes = [
@@ -897,6 +949,21 @@ def _auto_write_context(
         }
     )
     return context
+
+
+def _existing_auto_record(
+    vault: Path, session_id: str, trigger: str, source_commit: str | None
+) -> Path | None:
+    for folder in CORRECTABLE_FOLDERS:
+        for note in _read_folder(vault / "codex-context", folder):
+            metadata = note["metadata"]
+            if (
+                metadata.get("session") == session_id
+                and metadata.get("trigger") == trigger
+                and metadata.get("source_commit") == source_commit
+            ):
+                return note["path"]
+    return None
 
 
 def _ledger_record_write(
@@ -937,6 +1004,17 @@ def _ledger_record_write(
 GIT_TIMEOUT_SECONDS = 15
 
 
+def _git_path(vault_path: Path, name: str) -> Path:
+    """Resolve a path inside the git dir via plumbing, so linked worktrees
+    (where `.git` is a file, not a directory) work. Falls back to `.git/<name>`
+    for non-repos."""
+    result = _run_git(vault_path, "rev-parse", "--git-path", name)
+    if result.returncode == 0 and result.stdout.strip():
+        resolved = Path(result.stdout.strip())
+        return resolved if resolved.is_absolute() else vault_path / resolved
+    return vault_path / ".git" / name
+
+
 def _run_git(vault_path: Path, *args: str, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -955,7 +1033,7 @@ def _run_git(vault_path: Path, *args: str, timeout: int | None = None) -> subpro
 @contextlib.contextmanager
 def _vault_lock(vault_path: Path):
     """Serialize every git-touching operation on one clone across processes."""
-    lock_path = vault_path / ".git" / "context-vault.lock"
+    lock_path = _git_path(vault_path, "context-vault.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w", encoding="utf-8") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
@@ -970,7 +1048,7 @@ def sync_status(vault_path: Path) -> dict[str, Any]:
     result = _run_git(vault_path, "rev-list", "--count", "@{u}..HEAD")
     if result.returncode == 0:
         unpushed = int(result.stdout.strip() or "0")
-    fetch_head = vault_path / ".git" / "FETCH_HEAD"
+    fetch_head = _git_path(vault_path, "FETCH_HEAD")
     last_synced = None
     if fetch_head.exists():
         last_synced = datetime.fromtimestamp(fetch_head.stat().st_mtime, timezone.utc).isoformat()
@@ -982,12 +1060,19 @@ def sync_read(vault_path: Path) -> dict[str, Any]:
     with _vault_lock(vault_path):
         fetch = _run_git(vault_path, "fetch", "origin", timeout=GIT_TIMEOUT_SECONDS)
         online = fetch.returncode == 0
+        state = "offline"
         if online:
             dirty = _run_git(vault_path, "status", "--porcelain").stdout.strip()
-            if not dirty and sync_status(vault_path)["unpushed"] == 0:
-                _run_git(vault_path, "merge", "--ff-only", "@{u}")
+            if dirty:
+                state = "blocked-dirty"
+            elif sync_status(vault_path)["unpushed"] > 0:
+                state = "blocked-ahead"
+            else:
+                merged = _run_git(vault_path, "merge", "--ff-only", "@{u}")
+                state = "fast-forwarded" if merged.returncode == 0 else "blocked-diverged"
         status = sync_status(vault_path)
         status["online"] = online
+        status["state"] = state
         return status
 
 
@@ -996,7 +1081,15 @@ def _commit_quarantine(vault_path: Path) -> bool:
     if not status.stdout.strip():
         return False
     _run_git(vault_path, "add", "codex-context/conflicts")
-    _run_git(vault_path, "commit", "-m", "quarantine: preserve diverged record versions")
+    # Pathspec commit: only the quarantine folder, never a developer's staged files.
+    _run_git(
+        vault_path,
+        "commit",
+        "-m",
+        "quarantine: preserve diverged record versions",
+        "--",
+        "codex-context/conflicts",
+    )
     _run_git(vault_path, "push", timeout=GIT_TIMEOUT_SECONDS)
     return True
 
@@ -1005,24 +1098,44 @@ def sync_push(
     vault_path: Path, paths: list[Path], message: str, retries: int = 3
 ) -> dict[str, Any]:
     with _vault_lock(vault_path):
-        for path in paths:
-            _run_git(vault_path, "add", str(path))
-        _run_git(vault_path, "commit", "-m", message)
+        error = None
+        if paths:
+            relative = [
+                str(path.relative_to(vault_path)) if path.is_absolute() else str(path)
+                for path in paths
+            ]
+            add = _run_git(vault_path, "add", "--", *relative)
+            if add.returncode != 0:
+                error = f"git add failed: {add.stderr.strip()[:200]}"
+            else:
+                # Pathspec commit: commits ONLY the requested record files, even
+                # when a developer has unrelated changes staged in this clone.
+                commit = _run_git(vault_path, "commit", "-m", message, "--", *relative)
+                if commit.returncode != 0:
+                    error = f"git commit failed: {commit.stderr.strip()[:200]}"
         pushed = False
-        for _ in range(retries):
-            if _run_git(vault_path, "push", timeout=GIT_TIMEOUT_SECONDS).returncode == 0:
-                pushed = True
-                break
-            pull = _run_git(vault_path, "pull", "--rebase", timeout=GIT_TIMEOUT_SECONDS)
-            if pull.returncode != 0:
-                # Never leave the vault mid-rebase; local commits stay safe.
-                _run_git(vault_path, "rebase", "--abort")
-                break
-        _commit_quarantine(vault_path)
-        return {"pushed": pushed, **sync_status(vault_path)}
+        if error is None:
+            for _ in range(retries):
+                if _run_git(vault_path, "push", timeout=GIT_TIMEOUT_SECONDS).returncode == 0:
+                    pushed = True
+                    break
+                pull = _run_git(vault_path, "pull", "--rebase", timeout=GIT_TIMEOUT_SECONDS)
+                if pull.returncode != 0:
+                    # Never leave the vault mid-rebase; local commits stay safe.
+                    _run_git(vault_path, "rebase", "--abort")
+                    break
+            _commit_quarantine(vault_path)
+        result = {"pushed": pushed, **sync_status(vault_path)}
+        if error:
+            result["error"] = error
+        return result
 
 
-RECORD_FOLDERS = ("facts", "decisions", "sessions")
+RECORD_FOLDERS = ("facts", "decisions", "sessions", "withdrawals")
+
+# Folders whose records can be corrected. Withdrawals are excluded on purpose:
+# a tombstone cannot itself be withdrawn or retracted.
+CORRECTABLE_FOLDERS = ("facts", "decisions", "sessions")
 
 
 def _hunks(base: list[str], other: list[str]) -> list[tuple[int, int, list[str]]]:
@@ -1130,7 +1243,25 @@ def _note_summary(note: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
-def _active_decisions(notes_root: Path, project_id: str) -> list[dict[str, Any]]:
+def _apply_withdrawal_rule(
+    notes: list[dict[str, Any]], withdrawn: dict[str, str], historical: bool
+) -> list[dict[str, Any]]:
+    """One temporal rule for every record type: current state hides withdrawn
+    records; historical views return them annotated with `withdrawn_at`."""
+    kept = []
+    for note in notes:
+        withdrawal_time = withdrawn.get(note["path"].stem)
+        if withdrawal_time is None:
+            kept.append(note)
+        elif historical:
+            note["metadata"]["withdrawn_at"] = withdrawal_time
+            kept.append(note)
+    return kept
+
+
+def _active_decisions(
+    notes_root: Path, project_id: str, historical: bool = False
+) -> list[dict[str, Any]]:
     withdrawn = _withdrawals(notes_root)
     decisions = [
         note
@@ -1138,8 +1269,8 @@ def _active_decisions(notes_root: Path, project_id: str) -> list[dict[str, Any]]
         if note["metadata"].get("type") == "decision"
         and note["metadata"].get("project") == project_id
         and note["metadata"].get("status") == "active"
-        and note["path"].stem not in withdrawn
     ]
+    decisions = _apply_withdrawal_rule(decisions, withdrawn, historical)
     superseded_ids = {
         str(note["metadata"]["supersedes"])
         for note in decisions
@@ -1152,15 +1283,17 @@ def _active_decisions(notes_root: Path, project_id: str) -> list[dict[str, Any]]
     )
 
 
-def _recent_sessions(notes_root: Path, project_id: str) -> list[dict[str, Any]]:
+def _recent_sessions(
+    notes_root: Path, project_id: str, historical: bool = False
+) -> list[dict[str, Any]]:
     withdrawn = _withdrawals(notes_root)
     sessions = [
         note
         for note in _read_folder(notes_root, "sessions")
         if note["metadata"].get("type") == "session"
         and note["metadata"].get("project") == project_id
-        and note["path"].stem not in withdrawn
     ]
+    sessions = _apply_withdrawal_rule(sessions, withdrawn, historical)
     # Checkpoint chains: a superseded checkpoint is hidden by its successor,
     # so one working session collapses to one visible record.
     superseded_ids = {
@@ -1180,7 +1313,7 @@ def detect_disputes(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Contradictory active facts: same subject and exclusive relation, >1 value."""
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for fact in facts:
-        if fact.get("cardinality") == "multi":
+        if fact.get("cardinality") == "multi" or fact.get("withdrawn_at"):
             continue
         key = (str(fact.get("subject")), str(fact.get("relation")))
         grouped.setdefault(key, []).append(fact)
@@ -1214,13 +1347,24 @@ def build_brief(
 ) -> dict[str, Any]:
     project_note = project_note or find_project(notes_root, workspace)
     project = project_note["metadata"]
+    # One temporal rule: a query pinned to a time is historical and sees
+    # withdrawn records annotated; the current view hides them.
+    historical = valid_at is not None or known_at is not None
     facts = [
         _note_summary(note)
-        for note in resolve_facts(notes_root, valid_at or date.today(), known_at)
+        for note in resolve_facts(
+            notes_root, valid_at or date.today(), known_at, historical=historical
+        )
         if note["metadata"].get("project") == project["id"]
     ]
-    decisions = [_note_summary(note) for note in _active_decisions(notes_root, project["id"])]
-    sessions = [_note_summary(note) for note in _recent_sessions(notes_root, project["id"])]
+    decisions = [
+        _note_summary(note)
+        for note in _active_decisions(notes_root, project["id"], historical=historical)
+    ]
+    sessions = [
+        _note_summary(note)
+        for note in _recent_sessions(notes_root, project["id"], historical=historical)
+    ]
     by_repo: dict[str, dict[str, list[str]]] = {}
     for kind, items in (("facts", facts), ("decisions", decisions), ("sessions", sessions)):
         for item in items:
@@ -1408,19 +1552,18 @@ def resolve_facts(
     notes_root: Path,
     valid_at: date,
     known_at: datetime | None = None,
+    historical: bool = False,
 ) -> list[dict[str, Any]]:
     withdrawn = _withdrawals(notes_root)
+    pool = [
+        note
+        for note in _read_folder(notes_root, "facts")
+        if note["metadata"].get("type") == "fact"
+    ]
+    pool = _apply_withdrawal_rule(pool, withdrawn, historical)
     candidates = []
-    for note in _read_folder(notes_root, "facts"):
+    for note in pool:
         metadata = note["metadata"]
-        if metadata.get("type") != "fact":
-            continue
-        withdrawal_time = withdrawn.get(note["path"].stem)
-        if withdrawal_time is not None:
-            # Bitemporal honesty: hidden from current state, but a --known-at
-            # earlier than the withdrawal still sees the record as it was known.
-            if known_at is None or _parse_recorded_at(withdrawal_time) <= known_at:
-                continue
         if date.fromisoformat(str(metadata["valid_from"])) > valid_at:
             continue
         valid_to = metadata.get("valid_to")
@@ -1634,7 +1777,7 @@ VALIDATE_WORKFLOW = """\
 name: Validate Context Vault
 on:
   push:
-    branches: [main]
+    branches: [{branch}]
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -1711,6 +1854,7 @@ def init_team(
     path: Path | None = None,
     config_home: Path | None = None,
     identity: str | None = None,
+    branch: str | None = None,
 ) -> dict[str, Any]:
     try:
         config = load_config(config_home)
@@ -1738,15 +1882,23 @@ def init_team(
         )
     target = (path or Path.home() / "Documents" / f"{name}-context").expanduser().resolve()
     if not target.exists():
+        clone_command = ["git", "clone"]
+        if branch:
+            clone_command += ["-b", branch]
+        clone_command += [repo, str(target)]
         clone = subprocess.run(
-            ["git", "clone", repo, str(target)],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
+            clone_command, capture_output=True, text=True, check=False, timeout=60
         )
         if clone.returncode != 0:
             raise ContextVaultError(f"git clone failed: {clone.stderr.strip()}")
+    # The canonical vault branch is configuration, not convention: resolve it,
+    # verify any requested branch is actually checked out, and persist it.
+    current_branch = _run_git(target, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if branch and current_branch != branch:
+        raise ContextVaultError(
+            f"vault checkout is on {current_branch!r}, not the requested branch {branch!r}"
+        )
+    vault_branch = branch or current_branch or "main"
     notes_root = target / "codex-context"
     for folder in VAULT_FOLDERS:
         (notes_root / folder).mkdir(parents=True, exist_ok=True)
@@ -1768,7 +1920,7 @@ def init_team(
     workflow = target / ".github" / "workflows" / "context-vault-validate.yml"
     if not workflow.exists():
         workflow.parent.mkdir(parents=True, exist_ok=True)
-        workflow.write_text(VALIDATE_WORKFLOW, encoding="utf-8")
+        workflow.write_text(VALIDATE_WORKFLOW.format(branch=vault_branch), encoding="utf-8")
         created.append(workflow)
     onboarding = target / "ONBOARDING.md"
     if not onboarding.exists():
@@ -1779,11 +1931,12 @@ def init_team(
         created.append(ensure_person_note(target, identity))
     register_merge_driver(target)
     push_info = sync_push(target, created, f"init-team: bootstrap by @{slugify(identity)}")
-    config["vaults"][name] = {"path": target, "sync": "git"}
+    config["vaults"][name] = {"path": target, "sync": "git", "branch": vault_branch}
     save_config(config, config_home)
     return {
         "vault": str(target),
         "name": name,
+        "branch": vault_branch,
         "created": [str(item) for item in created],
         "sync": push_info,
     }
@@ -1822,9 +1975,22 @@ def doctor(config_home: Path | None = None) -> dict[str, Any]:
                 "detail": "ok" if remote.returncode == 0 else (remote.stderr.strip()[:200] or "unreachable"),
             }
         )
-        rebase_residue = (path / ".git" / "rebase-merge").exists() or (
-            path / ".git" / "rebase-apply"
-        ).exists()
+        configured_branch = entry.get("branch")
+        if configured_branch:
+            current = _run_git(path, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+            checks.append(
+                {
+                    "check": f"{name}: on configured branch",
+                    "ok": current == configured_branch,
+                    "detail": current or "unknown"
+                    if current == configured_branch
+                    else f"on {current!r}, expected {configured_branch!r}",
+                }
+            )
+        rebase_residue = (
+            _git_path(path, "rebase-merge").exists()
+            or _git_path(path, "rebase-apply").exists()
+        )
         checks.append(
             {
                 "check": f"{name}: no rebase in progress",
@@ -2013,6 +2179,7 @@ def main(argv: list[str] | None = None) -> int:
     init_team_parser.add_argument("--vault-name", default="team")
     init_team_parser.add_argument("--path")
     init_team_parser.add_argument("--identity")
+    init_team_parser.add_argument("--branch")
 
     subparsers.add_parser("doctor", help="check team-vault health")
 
@@ -2021,6 +2188,11 @@ def main(argv: list[str] | None = None) -> int:
 
     vault_parser = subparsers.add_parser("vault", help="manage configured vaults")
     vault_parser.add_argument("action", choices=("list",))
+
+    resolve_mode_parser = subparsers.add_parser(
+        "resolve-mode", help="effective consent mode for the vault a workspace routes to"
+    )
+    resolve_mode_parser.add_argument("--workspace", required=True)
 
     auto_parser = subparsers.add_parser("auto", help="manage auto mode (standing consent)")
     auto_parser.add_argument("action", choices=("enable", "disable", "status"))
@@ -2140,6 +2312,30 @@ def main(argv: list[str] | None = None) -> int:
                             for item in payload[section]
                             if (item.get("consent") == "auto") == want_auto
                         ]
+                # Derived views must be rebuilt from the filtered lists, or the
+                # filter leaks excluded records through disputes/by_repo/sources.
+                facts = payload.get("current_facts", [])
+                decisions = payload.get("active_decisions", [])
+                sessions = payload.get("recent_sessions", [])
+                payload["disputes"] = detect_disputes(facts)
+                by_repo: dict[str, Any] = {}
+                for kind, items in (
+                    ("facts", facts),
+                    ("decisions", decisions),
+                    ("sessions", sessions),
+                ):
+                    for item in items:
+                        for repo in item.get("repos") or []:
+                            bucket = by_repo.setdefault(
+                                str(repo), {"facts": [], "decisions": [], "sessions": []}
+                            )
+                            bucket[kind].append(str(item.get("id")))
+                payload["by_repo"] = by_repo
+                if "sources" in payload:
+                    payload["sources"] = [
+                        payload["sources"][0],
+                        *(item["source"] for item in (*facts, *decisions, *sessions)),
+                    ]
             _emit(payload)
             return 0
         if args.command == "propose-fact":
@@ -2304,6 +2500,7 @@ def main(argv: list[str] | None = None) -> int:
                     name=args.vault_name,
                     path=Path(args.path) if args.path else None,
                     identity=args.identity,
+                    branch=args.branch,
                 )
             )
             return 0
@@ -2335,6 +2532,20 @@ def main(argv: list[str] | None = None) -> int:
                         }
                         for name, entry in config["vaults"].items()
                     },
+                }
+            )
+            return 0
+        if args.command == "resolve-mode":
+            # Routing without syncing: fast enough for hooks, and mode is a
+            # property of the routed vault, never of the config as a whole.
+            config = load_config()
+            vault_name, _note = find_project_across_vaults(config, Path(args.workspace))
+            entry = config["vaults"][vault_name]
+            _emit(
+                {
+                    "vault": vault_name,
+                    "mode": vault_mode(config, entry),
+                    "sync": entry.get("sync"),
                 }
             )
             return 0

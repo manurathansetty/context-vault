@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import ledger_has_wrapup  # noqa: E402
+from common import ledger_has_wrapup, log_hook_failure  # noqa: E402
 
 MARKER_SCHEMA = 1
 MIN_USER_MESSAGES = 5
@@ -101,5 +101,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception:  # noqa: BLE001 — hooks must never break a session
+    except Exception as error:  # noqa: BLE001 — hooks must never break a session
+        log_hook_failure("session_end", repr(error))
         raise SystemExit(0)

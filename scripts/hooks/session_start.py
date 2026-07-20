@@ -16,7 +16,7 @@ from pathlib import Path
 BRIEF_TIMEOUT_SECONDS = 90
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import auto_mode_active  # noqa: E402
+from common import cli_path, log_hook_failure, resolve_workspace_mode  # noqa: E402
 from session_end import cleanup, markers_dir  # noqa: E402
 
 
@@ -34,13 +34,6 @@ def run_auto_status() -> str | None:
     if result.returncode != 0 or not result.stdout.strip():
         return None
     return result.stdout.strip()
-
-
-def cli_path() -> Path:
-    override = os.environ.get("CONTEXT_VAULT_CLI")
-    if override:
-        return Path(override)
-    return Path(__file__).resolve().parents[1] / "context_vault.py"
 
 
 def run_brief(cwd: str) -> str | None:
@@ -103,13 +96,15 @@ def main() -> int:
     marker_text = pending_marker_text(directory)
     if marker_text:
         sections.append(marker_text)
-    if auto_mode_active():
+    # Auto instructions apply only when THIS workspace routes to an auto vault;
+    # another vault being auto elsewhere must not change behavior here.
+    if cwd and resolve_workspace_mode(cwd) == "auto":
         digest = run_auto_status()
         if digest:
             sections.append(
-                "Context Vault auto mode is ON (standing consent; record at "
-                "milestones without pausing for approval; wrap up before ending). "
-                "Status digest:\n" + digest
+                "Context Vault auto mode is ON for this workspace's vault "
+                "(standing consent; record at milestones without pausing for "
+                "approval; wrap up before ending). Status digest:\n" + digest
             )
     if not sections:
         return 0
@@ -129,5 +124,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception:  # noqa: BLE001 — hooks must never break a session
+    except Exception as error:  # noqa: BLE001 — hooks must never break a session
+        log_hook_failure("session_start", repr(error))
         raise SystemExit(0)

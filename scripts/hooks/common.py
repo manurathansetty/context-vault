@@ -3,7 +3,80 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
+
+
+def cli_path() -> Path:
+    override = os.environ.get("CONTEXT_VAULT_CLI")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parents[1] / "context_vault.py"
+
+
+def resolve_workspace_mode(cwd: str) -> str | None:
+    """Effective consent mode of the vault this workspace routes to.
+
+    Mode is a property of the routed vault — never of the config as a whole —
+    so hooks must not treat 'some vault somewhere is auto' as auto. Returns
+    None when routing is unavailable (hooks then stay silent)."""
+    if os.environ.get("CONTEXT_VAULT_MANUAL") == "1":
+        return "manual"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(cli_path()), "resolve-mode", "--workspace", cwd],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        return json.loads(result.stdout).get("mode")
+    except json.JSONDecodeError:
+        return None
+
+
+def is_vault_path_check(cwd: str) -> bool:
+    """True when cwd lies inside any configured vault (records repo, not code)."""
+    config = load_raw_config()
+    paths = []
+    if isinstance(config.get("vault_path"), str):
+        paths.append(config["vault_path"])
+    vaults = config.get("vaults")
+    if isinstance(vaults, dict):
+        paths.extend(
+            entry.get("path")
+            for entry in vaults.values()
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+        )
+    try:
+        resolved = Path(cwd).resolve()
+    except OSError:
+        return False
+    for path in paths:
+        try:
+            if resolved.is_relative_to(Path(path).expanduser().resolve()):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def log_hook_failure(hook: str, error: str) -> None:
+    try:
+        path = config_base()
+        path.mkdir(parents=True, exist_ok=True)
+        log = path / "hook-failures.log"
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(f"{hook}: {error}"[:500] + "\n")
+        os.chmod(log, 0o600)
+    except OSError:
+        pass
 
 
 def config_base() -> Path:

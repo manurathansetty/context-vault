@@ -14,7 +14,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-RECORD_FOLDERS = ("facts", "decisions", "sessions")
+RECORD_FOLDERS = ("facts", "decisions", "sessions", "withdrawals")
 
 REQUIRED = {
     "fact": (

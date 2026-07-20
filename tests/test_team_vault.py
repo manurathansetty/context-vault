@@ -16,7 +16,7 @@ sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
 import context_vault
 
 
-class TeamVaultTests(unittest.TestCase):
+class TeamVaultBase(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
@@ -85,6 +85,20 @@ class TeamVaultTests(unittest.TestCase):
         self._git(clone, "config", "merge.context-vault.name", "Context Vault note merge")
         self._git(clone, "config", "merge.context-vault.driver", driver)
 
+    def _workspace_with_remote(self, name: str, remote: str) -> Path:
+        workspace = self.root / name
+        workspace.mkdir()
+        run(["git", "init", str(workspace)], capture_output=True, check=True)
+        run(
+            ["git", "-C", str(workspace), "remote", "add", "origin", remote],
+            capture_output=True,
+            check=True,
+        )
+        return workspace
+
+
+
+class TeamVaultTests(TeamVaultBase):
     # ------------------------------------------------------------------ config
 
     def test_load_config_accepts_legacy_shape(self) -> None:
@@ -159,17 +173,6 @@ class TeamVaultTests(unittest.TestCase):
             "https://github.com/your-org/app",
         ):
             self.assertEqual(context_vault.normalize_remote_url(url), "github.com/your-org/app")
-
-    def _workspace_with_remote(self, name: str, remote: str) -> Path:
-        workspace = self.root / name
-        workspace.mkdir()
-        run(["git", "init", str(workspace)], capture_output=True, check=True)
-        run(
-            ["git", "-C", str(workspace), "remote", "add", "origin", remote],
-            capture_output=True,
-            check=True,
-        )
-        return workspace
 
     def test_find_project_across_vaults_matches_by_remote(self) -> None:
         team_vault = self.root / "team"
@@ -701,7 +704,7 @@ class TeamVaultTests(unittest.TestCase):
         self.assertEqual(len(brief_payload["current_facts"]), 1)
 
 
-class TopicLayerTests(TeamVaultTests):
+class TopicLayerTests(TeamVaultBase):
     def test_record_repos_prefers_flags_then_workspace(self) -> None:
         workspace = self._workspace_with_remote("repo-ws", "git@github.com:your-org/app.git")
         self.assertEqual(
