@@ -158,6 +158,24 @@ config. Bootstrap a brand-new team vault by creating an empty private repo first
 | ⚔️ | **Conflicts are visible, never silent.** Records are append-only new files (structurally conflict-free); mutable notes auto-merge with a visible `merge_status` mark; diverged records are preserved byte-for-byte with one copy quarantined; contradictory facts surface as **disputes** in every brief (`--cardinality multi` opts out relations where many values are normal). |
 | 🛡️ | **CI backstop.** The vendored workflow validates schema and author stamps, flags stale marks, and reports any edit of a historical record as an append-only violation. |
 
+### 🟣 Obsidian Sync transport (v0.5, experimental)
+
+Already paying for **Obsidian Sync**? `sync: "obsidian"` team vaults keep the
+same schema, attribution, disputes, topics, and auto mode — with file
+transport handled entirely by Obsidian Sync instead of git:
+
+```bash
+# create/join the shared vault in the Obsidian Sync UI first, then:
+python3 "$CV" init-obsidian-team --path "/path/to/local/synced/vault" --identity yourname
+```
+
+Honest trade-offs vs. git vaults: sync freshness is invisible to the CLI
+(briefs say `freshness: unknown`), mutable-note conflicts are merged by
+Obsidian Sync itself, there's no git history or CI, and `withdraw` is the
+only correction (`retract` needs git). Git remains the recommended canonical
+transport; full comparison in
+[`docs/design/v0.5-obsidian-sync.md`](docs/design/v0.5-obsidian-sync.md).
+
 ## 🧵 Topics across repos
 
 Projects are topics ("Payments revamp"), and one topic may span several code
@@ -283,6 +301,7 @@ Run `python3 "$CV" --help` for every flag.
 | 🤝 v0.2 | Team vaults: locked git sync, merge driver + quarantine, attribution, disputes, CI |
 | 🧵 v0.3 | Topics across repos, repo facets, one-command onboarding, capture hooks |
 | ⚡ v0.4 | Auto mode: standing consent, milestone checkpoints, idempotency ledger, withdraw/retract |
+| 🟣 v0.5 | Obsidian Sync team-vault transport (experimental; git stays canonical) |
 
 ## 📜 License
 

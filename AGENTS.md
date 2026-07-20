@@ -23,6 +23,8 @@ the product truth.
      routing, capture hooks and the marker store.
    - `v0.4-auto-mode.md` — auto mode: standing consent, triggers, ledger,
      withdraw/retract, plus the full decision log.
+   - `v0.5-obsidian-sync.md` — the Obsidian Sync team-vault transport and
+     its honest degradations (git stays the canonical transport).
    - `roadmap.md` — future direction (retrieval, ambient capture) and the
      honest threat model for approval/consent.
 3. **Tests** (`tests/`) — executable spec. `test_context_vault.py` covers

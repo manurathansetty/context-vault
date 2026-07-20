@@ -76,6 +76,8 @@ VAULT_FOLDERS = (
 
 VALID_MODES = ("manual", "auto")
 
+TEAM_SYNC_MODES = ("git", "obsidian")
+
 
 def configure(vault: Path, config_home: Path | None = None, identity: str | None = None) -> Path:
     vault = vault.expanduser().resolve()
@@ -128,14 +130,19 @@ def _parse_config(payload: dict[str, Any]) -> dict[str, Any]:
             branch = entry.get("branch")
             if branch is not None and (not isinstance(branch, str) or not branch.strip()):
                 raise ContextVaultError(f"vault {name!r} has an invalid branch")
+            sync = entry.get("sync")
+            if sync is not None and sync not in TEAM_SYNC_MODES:
+                raise ContextVaultError(f"vault {name!r} has an invalid sync mode {sync!r}")
             vaults[name] = {
                 "path": Path(path).expanduser().resolve(),
-                "sync": entry.get("sync"),
+                "sync": sync,
                 "branch": branch,
                 "mode": mode,
                 "mode_set_at": entry.get("mode_set_at"),
             }
-        synced = [name for name, entry in vaults.items() if entry.get("sync") == "git"]
+        synced = [
+            name for name, entry in vaults.items() if entry.get("sync") in TEAM_SYNC_MODES
+        ]
         if len(synced) > 2:
             raise ContextVaultError(
                 "at most two team vaults are supported; remove one of: " + ", ".join(synced)
@@ -697,6 +704,8 @@ def auto_status(config: dict[str, Any]) -> dict[str, Any]:
         info: dict[str, Any] = {"mode": vault_mode(config, entry)}
         if entry.get("sync") == "git":
             info.update(sync_status(entry["path"]))
+        elif entry.get("sync") == "obsidian":
+            info["managed_by"] = "obsidian-sync"
         vaults[name] = info
     ledger_files = sorted(_ledger_dir().glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
     latest: dict[str, Any] = {}
@@ -1014,6 +1023,8 @@ def _ledger_record_write(
             or None
         )
         push_state = "pushed" if (sync_result or {}).get("pushed") else "pending-sync"
+    elif entry.get("sync") == "obsidian":
+        push_state = "obsidian-sync"
     ledger_append(
         context["session_id"],
         {
@@ -1863,6 +1874,36 @@ jobs:
           python3 scripts/validate_vault.py --require-author --max-mark-age-days 3 $RANGE
 """
 
+ONBOARDING_OBSIDIAN_TEMPLATE = """\
+# Joining this team's Context Vault (Obsidian Sync)
+
+This shared Obsidian vault is your team's project memory, managed by the
+[Context Vault](https://github.com/manurathansetty/context-vault) plugin and
+synced by **Obsidian Sync** (no git involved).
+
+## One-time setup
+
+1. Ask a teammate to share this remote vault with you in Obsidian Sync, then
+   connect it in Obsidian so it syncs to a local folder.
+2. Install the Context Vault plugin in your agent (Claude Code or Codex).
+3. Register the synced folder (pick your own identity name):
+
+   ```bash
+   python3 <plugin>/scripts/context_vault.py init-obsidian-team \\
+     --path "/path/to/your/local/synced/vault" --identity yourname
+   ```
+
+4. Verify: `python3 <plugin>/scripts/context_vault.py doctor`
+
+## Honest limitations of the Obsidian Sync transport
+
+- The CLI cannot see sync freshness — briefs will say so.
+- Conflicting edits to mutable notes are merged by Obsidian Sync itself and
+  may blend silently; records are safe (append-only new files).
+- There is no git history or CI here; `withdraw` is the only correction
+  command (`retract` needs a git vault).
+"""
+
 GITATTRIBUTES_LINE = "*.md merge=context-vault"
 
 GITIGNORE_CONTENT = """\
@@ -1943,7 +1984,7 @@ def init_team(
     synced = [
         vault_name
         for vault_name, entry in config["vaults"].items()
-        if entry.get("sync") == "git" and vault_name != name
+        if entry.get("sync") in TEAM_SYNC_MODES and vault_name != name
     ]
     if len(synced) >= 2:
         raise ContextVaultError(
@@ -2011,6 +2052,70 @@ def init_team(
     }
 
 
+def init_obsidian_team(
+    path: Path,
+    name: str = "team",
+    config_home: Path | None = None,
+    identity: str | None = None,
+) -> dict[str, Any]:
+    """Register an Obsidian-Sync-shared vault as a team vault. No git anywhere:
+    the user creates/joins the shared vault in Obsidian Sync first."""
+    try:
+        config = load_config(config_home)
+    except ContextVaultError:
+        if not identity:
+            raise
+        config = {"identity": identity, "vaults": {}, "default_mode": None}
+    if identity and not config.get("identity"):
+        config["identity"] = identity
+    identity = config.get("identity")
+    if not identity:
+        raise ContextVaultError(
+            "init-obsidian-team requires an identity; pass --identity <name>"
+        )
+    synced = [
+        vault_name
+        for vault_name, entry in config["vaults"].items()
+        if entry.get("sync") in TEAM_SYNC_MODES and vault_name != name
+    ]
+    if len(synced) >= 2:
+        raise ContextVaultError(
+            "at most two team vaults are supported; already configured: " + ", ".join(synced)
+        )
+    target = path.expanduser().resolve()
+    if not target.is_dir():
+        raise ContextVaultError(
+            f"{target} does not exist — create/join the shared vault in Obsidian Sync "
+            "first, then point --path at the local synced folder"
+        )
+    notes_root = target / "codex-context"
+    for folder in VAULT_FOLDERS:
+        (notes_root / folder).mkdir(parents=True, exist_ok=True)
+    created: list[str] = []
+    onboarding = target / "ONBOARDING-OBSIDIAN.md"
+    if not onboarding.exists():
+        onboarding.write_text(ONBOARDING_OBSIDIAN_TEMPLATE, encoding="utf-8")
+        created.append(str(onboarding))
+    person = notes_root / "people" / f"@{slugify(identity)}.md"
+    if not person.exists():
+        created.append(str(ensure_person_note(target, identity)))
+    config["vaults"][name] = {
+        "path": target,
+        "sync": "obsidian",
+        "branch": None,
+        "mode": None,
+        "mode_set_at": None,
+    }
+    save_config(config, config_home)
+    return {
+        "vault": str(target),
+        "name": name,
+        "sync": "obsidian",
+        "created": created,
+        "note": "files sync via Obsidian Sync; freshness is not visible to the CLI",
+    }
+
+
 def doctor(config_home: Path | None = None) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     try:
@@ -2025,6 +2130,27 @@ def doctor(config_home: Path | None = None) -> dict[str, Any]:
         }
     )
     for name, entry in config["vaults"].items():
+        if entry.get("sync") == "obsidian":
+            path = entry["path"]
+            checks.append(
+                {
+                    "check": f"{name}: synced folder present",
+                    "ok": path.is_dir() and os.access(path, os.W_OK),
+                    "detail": str(path),
+                }
+            )
+            marks = repair_chores(path / "codex-context")
+            checks.append(
+                {"check": f"{name}: merge_status marks", "ok": not marks, "detail": str(len(marks))}
+            )
+            checks.append(
+                {
+                    "check": f"{name}: sync freshness",
+                    "ok": True,
+                    "detail": "managed by Obsidian Sync — not visible to the CLI",
+                }
+            )
+            continue
         if entry.get("sync") != "git":
             continue
         path = entry["path"]
@@ -2250,6 +2376,13 @@ def main(argv: list[str] | None = None) -> int:
     init_team_parser.add_argument("--identity")
     init_team_parser.add_argument("--branch")
 
+    init_obsidian_parser = subparsers.add_parser(
+        "init-obsidian-team", help="register an Obsidian-Sync-shared vault as a team vault"
+    )
+    init_obsidian_parser.add_argument("--path", required=True)
+    init_obsidian_parser.add_argument("--vault-name", default="team")
+    init_obsidian_parser.add_argument("--identity")
+
     subparsers.add_parser("doctor", help="check team-vault health")
 
     sync_parser = subparsers.add_parser("sync", help="pull and push synced vaults")
@@ -2341,12 +2474,22 @@ def main(argv: list[str] | None = None) -> int:
                     routed_entry = entry
                     if entry.get("sync") == "git":
                         sync_map[args.vault_name] = sync_read(entry["path"])
+                    elif entry.get("sync") == "obsidian":
+                        sync_map[args.vault_name] = {
+                            "managed_by": "obsidian-sync",
+                            "freshness": "unknown",
+                        }
                     notes_root = entry["path"] / "codex-context"
                 else:
                     for name, entry in config["vaults"].items():
                         if entry.get("sync") == "git":
                             # Failure-isolated: an offline vault serves local notes.
                             sync_map[name] = sync_read(entry["path"])
+                        elif entry.get("sync") == "obsidian":
+                            sync_map[name] = {
+                                "managed_by": "obsidian-sync",
+                                "freshness": "unknown",
+                            }
                     if args.project:
                         vault_name, project_note = find_project_by_id(config, args.project)
                     else:
@@ -2463,6 +2606,8 @@ def main(argv: list[str] | None = None) -> int:
                     vault_path, [note], f"record fact: {args.subject} {args.relation}"
                 )
                 result["sync"] = sync_result
+            elif entry.get("sync") == "obsidian":
+                result["sync"] = {"managed_by": "obsidian-sync"}
             _ledger_record_write(
                 auto_ctx, entry, vault_path, note, sync_result, args.workspace, None
             )
@@ -2513,6 +2658,8 @@ def main(argv: list[str] | None = None) -> int:
             if entry.get("sync") == "git":
                 sync_result = sync_push(vault_path, [note], f"record decision: {args.title}")
                 result["sync"] = sync_result
+            elif entry.get("sync") == "obsidian":
+                result["sync"] = {"managed_by": "obsidian-sync"}
             _ledger_record_write(
                 auto_ctx, entry, vault_path, note, sync_result, args.workspace, None
             )
@@ -2562,6 +2709,8 @@ def main(argv: list[str] | None = None) -> int:
             if entry.get("sync") == "git":
                 sync_result = sync_push(vault_path, [note], f"record session: {args.project}")
                 result["sync"] = sync_result
+            elif entry.get("sync") == "obsidian":
+                result["sync"] = {"managed_by": "obsidian-sync"}
             _ledger_record_write(
                 auto_ctx, entry, vault_path, note, sync_result, args.workspace, args.supersedes
             )
@@ -2577,6 +2726,15 @@ def main(argv: list[str] | None = None) -> int:
                     path=Path(args.path) if args.path else None,
                     identity=args.identity,
                     branch=args.branch,
+                )
+            )
+            return 0
+        if args.command == "init-obsidian-team":
+            _emit(
+                init_obsidian_team(
+                    Path(args.path),
+                    name=args.vault_name,
+                    identity=args.identity,
                 )
             )
             return 0
@@ -2650,6 +2808,8 @@ def main(argv: list[str] | None = None) -> int:
             result = {"path": str(note), "withdraws": stem}
             if entry.get("sync") == "git":
                 result["sync"] = sync_push(vault_path, [note], f"withdraw: {stem}")
+            elif entry.get("sync") == "obsidian":
+                result["sync"] = {"managed_by": "obsidian-sync"}
             _emit(result)
             return 0
         if args.command == "retract":
